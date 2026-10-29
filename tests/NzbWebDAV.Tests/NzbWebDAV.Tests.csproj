@@ -38,6 +38,9 @@
     <None Update="TestFixtures/Par2Corpus/**/*">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
+    <None Update="TestFixtures/EncryptedArticles/*">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
     <Content Include="..\..\contracts\**\*.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Link>contracts\%(RecursiveDir)%(Filename)%(Extension)</Link>

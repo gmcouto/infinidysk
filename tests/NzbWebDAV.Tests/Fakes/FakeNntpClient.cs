@@ -1,11 +1,13 @@
 using System.Text;
 using NzbWebDAV.Clients.Usenet;
+using NzbWebDAV.Clients.Usenet.Contexts;
 using NzbWebDAV.Clients.Usenet.Models;
 using NzbWebDAV.Exceptions;
 using NzbWebDAV.Models;
 using NzbWebDAV.Streams;
 using UsenetSharp.Models;
 using UsenetSharp.Streams;
+using RuntimeYencContext = UsenetSharp.Encryption.YencEncryptionContext;
 
 namespace NzbWebDAV.Tests.Fakes;
 
@@ -48,11 +50,81 @@ internal sealed class FakeNntpClient(
     /// <summary>Adds or restores an article (e.g. provider-side recovery between checks).</summary>
     public void Serve(string segmentId, byte[] content) => _segments[segmentId] = content;
 
+    // INF-19: raw encrypted wire articles served through the production
+    // restore/decrypt path (UsenetSharp EncryptedYencAssembler via the
+    // encrypted YencStream). Values are raw article bytes, never re-encoded.
+    private readonly Dictionary<string, byte[]> _encryptedArticles = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// The runtime context encrypted articles are opened with. Settable so a
+    /// test can correct the password and re-read the same article. When this
+    /// is set it always wins (Phase 3 behaviour, unchanged). When it is null,
+    /// see <see cref="UseAmbientEncryptionContext"/> for the ambient mode.
+    /// </summary>
+    public RuntimeYencContext? EncryptionContext { get; set; }
+
+    /// <summary>
+    /// Honest ambient mode (opt-in; default off so Phase 3 tests keep their
+    /// fake-owned-context behaviour). When true AND
+    /// <see cref="EncryptionContext"/> is null, <c>DecodedBodyAsync</c> reads
+    /// <see cref="YencEncryptionRuntimeContext.CurrentRuntimeContext"/> at
+    /// entry — exactly mirroring production <c>BaseNntpClient</c>, whose
+    /// <c>YencEncryptionProvider</c> is
+    /// <c>() =&gt; YencEncryptionRuntimeContext.CurrentRuntimeContext</c>.
+    /// With no ambient runtime the fake then fails at body creation
+    /// (fail-closed InvalidOperationException) instead of silently decrypting
+    /// with a stashed context. This is what lets streaming tests see a
+    /// missing Activate/Capture in production stream code: a candidate
+    /// constructed without the captured runtime gets no decryption.
+    /// </summary>
+    public bool UseAmbientEncryptionContext { get; set; }
+
+    /// <summary>
+    /// The ambient runtime actually observed at each encrypted
+    /// <c>DecodedBodyAsync</c> entry while in ambient mode (null = none) —
+    /// the test-side observation of which mechanism presented the context.
+    /// Lets stream tests pin that candidate/verified reads ran under exactly
+    /// the captured runtime instance, not merely that bytes came out right.
+    /// </summary>
+    public List<RuntimeYencContext?> ObservedAmbientContexts { get; } = [];
+
+    /// <summary>
+    /// When true, the fake snapshots the ambient at <c>DecodedBodyAsync</c>
+    /// entry and then suppresses the AsyncLocal flow while building the body
+    /// — modelling a production provider whose work escapes the reader's
+    /// logical flow. Only the entry snapshot may then decrypt; a caller that
+    /// never captured/activated leaves a null snapshot and the body fails
+    /// closed. The snapshot is evaluated eagerly at entry (context object
+    /// only, no KDF). Default false; opt-in.
+    /// </summary>
+    public bool DetachEncryptedBodiesAfterEntry { get; set; }
+
+    /// <summary>
+    /// Registers a raw encrypted wire article. When <see cref="EncryptionContext"/>
+    /// is set, bodies/headers for this id are produced by the production
+    /// restore+AEAD transform; counters and completion counting are unchanged.
+    /// </summary>
+    public void ServeEncrypted(string segmentId, byte[] rawArticle) => _encryptedArticles[segmentId] = rawArticle;
+
+    public bool IsEncrypted(string segmentId) => _encryptedArticles.ContainsKey(segmentId);
+
     /// <summary>
     /// When set, BODY responses claim this SegmentId instead of the requested one
     /// so tests can exercise mismatch rejection without a live NNTP scramble.
     /// </summary>
     public string? ForcedResponseSegmentId { get; set; }
+
+    // B1/INF-25: controllable in-flight gate for encrypted bodies. When set,
+    // the encrypted branch wraps the raw article in a stream that delivers
+    // the first half, signals <see cref="EncryptedBodyInFlight"/>, then blocks
+    // on this gate — mirroring EncryptedLoopbackTests' gated decode so a test
+    // can cancel deterministically while a BODY is mid-flight. Honoured only
+    // on the encrypted path; plain bodies keep using decodedStreamFactory.
+    public TaskCompletionSource? EncryptedBodyGate { get; set; }
+
+    /// <summary>Signalled once the first half of a gated encrypted body has been delivered.</summary>
+    public TaskCompletionSource EncryptedBodyInFlight { get; } =
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     public override Task PrewarmConnectionsAsync(
         int targetConnections,
@@ -81,7 +153,7 @@ internal sealed class FakeNntpClient(
         var key = segmentId.ToString();
         StatRequestCounts[key] = StatRequestCounts.GetValueOrDefault(key) + 1;
         StatRequestOrder.Add(key);
-        var exists = _segments.ContainsKey(key);
+        var exists = _segments.ContainsKey(key) || _encryptedArticles.ContainsKey(key);
         return Task.FromResult(new UsenetStatResponse
         {
             ResponseCode = exists
@@ -124,6 +196,19 @@ internal sealed class FakeNntpClient(
         BodyRequestCounts[segmentKey] = BodyRequestCounts.GetValueOrDefault(segmentKey) + 1;
         try
         {
+            if (DetachEncryptedBodiesAfterEntry && EncryptionContext is null
+                && _encryptedArticles.ContainsKey(segmentKey))
+            {
+                // Snapshot at entry (context object only — declaring Current
+                // evaluates the Lazy runtime but no decode happens yet), then
+                // create the body with THIS flow's AsyncLocal suppressed so
+                // only the snapshot can decrypt. Restore immediately after.
+                var snapshot = UseAmbientEncryptionContext
+                    ? YencEncryptionRuntimeContext.CurrentRuntimeContext
+                    : null;
+                ObservedAmbientContexts.Add(snapshot);
+                return DetachedEncryptedBody(segmentId, snapshot, onConnectionReadyAgain);
+            }
             var response = CreateBodyResponse(segmentId);
             NoteCompletion(segmentKey);
             onConnectionReadyAgain?.Invoke(ArticleBodyResult.Retrieved);
@@ -214,14 +299,86 @@ internal sealed class FakeNntpClient(
         CompletionCallbackCounts[segmentKey] = CompletionCallbackCounts.GetValueOrDefault(segmentKey) + 1;
     }
 
+    private Task<UsenetDecodedBodyResponse> DetachedEncryptedBody(
+        SegmentId segmentId,
+        RuntimeYencContext? snapshot,
+        ArticleBodyCompletionHandler? onConnectionReadyAgain)
+    {
+        // Evaluated outside the caller's logical flow so no ambient leaks in.
+        // The entry snapshot is re-presented explicitly, mirroring production
+        // providers that snapshot the runtime once per operation.
+        try
+        {
+            UsenetDecodedBodyResponse response;
+            using (ExecutionContext.SuppressFlow())
+            {
+                using var activate = YencEncryptionRuntimeContext.Activate(snapshot);
+                response = CreateBodyResponse(segmentId, detachedSnapshot: snapshot);
+            }
+            NoteCompletion(segmentId.ToString());
+            onConnectionReadyAgain?.Invoke(ArticleBodyResult.Retrieved);
+            return Task.FromResult(response);
+        }
+        catch (Exception e)
+        {
+            return Task.FromException<UsenetDecodedBodyResponse>(e);
+        }
+    }
+
     private UsenetDecodedBodyResponse CreateBodyResponse(SegmentId segmentId) =>
         CreateBodyResponse(segmentId, _segments);
 
     private UsenetDecodedBodyResponse CreateBodyResponse(
         SegmentId segmentId,
-        IReadOnlyDictionary<string, byte[]> segments)
+        RuntimeYencContext? detachedSnapshot) =>
+        CreateBodyResponse(segmentId, _segments, detachedSnapshot);
+
+    private UsenetDecodedBodyResponse CreateBodyResponse(
+        SegmentId segmentId,
+        IReadOnlyDictionary<string, byte[]> segments,
+        RuntimeYencContext? detachedSnapshot = null)
     {
         var key = segmentId.ToString();
+        if (_encryptedArticles.TryGetValue(key, out var rawArticle))
+        {
+            // Explicit fake-owned context wins (Phase 3). Detached mode uses
+            // its explicit snapshot; ambient mode mirrors BaseNntpClient by
+            // snapshotting the AsyncLocal ambient at body entry.
+            RuntimeYencContext? context;
+            if (detachedSnapshot is not null || DetachEncryptedBodiesAfterEntry)
+            {
+                context = EncryptionContext ?? detachedSnapshot;
+            }
+            else
+            {
+                context = EncryptionContext
+                    ?? (UseAmbientEncryptionContext
+                        ? YencEncryptionRuntimeContext.CurrentRuntimeContext
+                        : null);
+                if (UseAmbientEncryptionContext && EncryptionContext is null)
+                    ObservedAmbientContexts.Add(context);
+            }
+            if (context is null)
+                throw new InvalidOperationException(
+                    "FakeNntpClient: set EncryptionContext before serving encrypted articles, " +
+                    "or enable UseAmbientEncryptionContext inside an active scope.");
+            Stream raw = new MemoryStream(rawArticle, writable: false);
+            // decodedStreamFactory (plain-path hook) is honoured here too when
+            // it can wrap the raw bytes; the deterministic gate below is the
+            // smallest mechanism when a test needs mid-flight control.
+            if (decodedStreamFactory is not null)
+                raw = decodedStreamFactory(key, rawArticle);
+            else if (EncryptedBodyGate is { } gate)
+                raw = new GatedRawArticleStream(rawArticle, EncryptedBodyInFlight, gate);
+            return new UsenetDecodedBodyResponse
+            {
+                SegmentId = ForcedResponseSegmentId ?? key,
+                ResponseCode = (int)UsenetResponseType.ArticleRetrievedBodyFollows,
+                ResponseMessage = "222 fake encrypted body",
+                Stream = new YencStream(raw, context),
+            };
+        }
+
         if (!segments.TryGetValue(key, out var bytes))
             throw new UsenetArticleNotFoundException(key, "430 No such article")
             {
@@ -259,6 +416,67 @@ internal sealed class FakeNntpClient(
             ResponseMessage = "222 fake body",
             Stream = stream,
         };
+    }
+
+    /// <summary>
+    /// Raw-article stream that delivers the first half, signals in-flight,
+    /// then blocks on the release gate (cancellation-aware). The encrypted
+    /// YencStream buffers the whole article before opening, so blocking here
+    /// blocks the decode mid-flight with zero plaintext released.
+    /// </summary>
+    private sealed class GatedRawArticleStream(
+        byte[] article, TaskCompletionSource inFlight, TaskCompletionSource release) : Stream
+    {
+        private int _position;
+        private bool _signalled;
+
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position
+        {
+            get => _position;
+            set => throw new NotSupportedException();
+        }
+
+        public override void Flush() { }
+
+        public override int Read(byte[] buffer, int offset, int count) =>
+            ReadAsync(buffer.AsMemory(offset, count), CancellationToken.None).AsTask().GetAwaiter().GetResult();
+
+        public override async ValueTask<int> ReadAsync(
+            Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            var half = article.Length / 2;
+            if (_position < half)
+            {
+                var count = Math.Min(buffer.Length, half - _position);
+                article.AsSpan(_position, count).CopyTo(buffer.Span);
+                _position += count;
+                if (_position >= half && !_signalled)
+                {
+                    _signalled = true;
+                    inFlight.TrySetResult();
+                }
+                return count;
+            }
+
+            if (_position < article.Length)
+            {
+                await release.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
+                var count = Math.Min(buffer.Length, article.Length - _position);
+                article.AsSpan(_position, count).CopyTo(buffer.Span);
+                _position += count;
+                return count;
+            }
+
+            return 0;
+        }
+
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
     }
 
     private static byte[] EncodeYenc(ReadOnlySpan<byte> source)
