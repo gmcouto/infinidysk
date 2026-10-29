@@ -2,6 +2,7 @@ using System.Buffers;
 using System.Buffers.Text;
 using System.Text;
 using RapidYencSharp;
+using UsenetSharp.Encryption;
 using UsenetSharp.Models;
 
 namespace UsenetSharp.Streams;
@@ -70,11 +71,48 @@ public class YencStream : FastReadOnlyNonSeekableStream
         _predecodedHeaders = predecodedHeaders;
     }
 
+    private readonly YencEncryptionContext? _encryptionContext;
+    private bool _encryptedOpened;
+    private byte[]? _encryptedPlaintext;
+    private int _encryptedPosition;
+
+    /// <summary>
+    /// Buffer-based encrypted path (INF-16): <paramref name="innerStream"/>
+    /// yields the raw encrypted article bytes; the whole segment is restored
+    /// and authenticated before the first plaintext byte is served. Caches
+    /// therefore store ciphertext only and re-authenticate on every read.
+    /// </summary>
+    public YencStream(Stream innerStream, YencEncryptionContext encryptionContext)
+        : this(innerStream)
+    {
+        _encryptionContext = encryptionContext ?? throw new ArgumentNullException(nameof(encryptionContext));
+    }
+
+    private async Task EnsureEncryptedOpenedAsync(CancellationToken cancellationToken)
+    {
+        if (_encryptedOpened)
+            return;
+        _encryptedOpened = true;
+        using var buffer = new MemoryStream();
+        await _innerStream.CopyToAsync(buffer, cancellationToken).ConfigureAwait(false);
+        var opened = EncryptedYencAssembler.OpenArticle(_encryptionContext!, buffer.ToArray());
+        _yencHeaders = opened.Headers;
+        _headersRead = true;
+        _encryptedPlaintext = opened.Plaintext;
+        _encryptedPosition = 0;
+    }
+
     /// <summary>
     /// Gets the yEnc headers from the stream. If headers haven't been read yet, reads and parses them asynchronously.
     /// </summary>
     public virtual async ValueTask<UsenetYencHeader?> GetYencHeadersAsync(CancellationToken cancellationToken = default)
     {
+        if (_encryptionContext != null)
+        {
+            await EnsureEncryptedOpenedAsync(cancellationToken).ConfigureAwait(false);
+            return _yencHeaders;
+        }
+
         if (_predecodedHeaders != null)
         {
             return await _predecodedHeaders.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -91,6 +129,19 @@ public class YencStream : FastReadOnlyNonSeekableStream
 
     public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
     {
+        if (_encryptionContext != null)
+        {
+            await EnsureEncryptedOpenedAsync(cancellationToken).ConfigureAwait(false);
+            var plaintext = _encryptedPlaintext!;
+            var remaining = plaintext.Length - _encryptedPosition;
+            if (remaining <= 0)
+                return 0;
+            var count = Math.Min(buffer.Length, remaining);
+            plaintext.AsSpan(_encryptedPosition, count).CopyTo(buffer.Span);
+            _encryptedPosition += count;
+            return count;
+        }
+
         if (_predecodedHeaders != null)
         {
             return await _innerStream.ReadAsync(buffer, cancellationToken).ConfigureAwait(false);

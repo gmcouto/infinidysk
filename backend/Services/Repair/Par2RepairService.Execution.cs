@@ -1,3 +1,4 @@
+using NzbWebDAV.Clients.Usenet.Contexts;
 using NzbWebDAV.Database;
 using NzbWebDAV.Database.Models;
 using NzbWebDAV.Extensions;
@@ -48,6 +49,14 @@ public partial class Par2RepairService
             var document = await NzbDocument.LoadAsync(nzbStream,
                 new NzbReadOptions(xmlCharacters, reads.Budget.Charge, reads.Budget.Reserve), ct).ConfigureAwait(false);
             payload = await LoadRepairPayloadAsync(item, reads, ct).ConfigureAwait(false);
+            // INF-22: the rest of this job (header probes, descriptor reads,
+            // source bodies, the two direct NzbFileStream constructions in
+            // Discovery) fetches bodies under the item's encryption scope.
+            // Installed after the payload load (a pure blob read); streams
+            // capture it at construction. Encrypted blob without a password
+            // fails closed here via YencEncryptionLocalException.
+            using var encryptionScope = YencEncryptionRuntimeContext.BeginForFile(
+                payload.YencEncrypted, payload.YencTransportPassword);
             reads.UnavailableIds.UnionWith(job.MissingSegmentIds);
             var resolved = await ResolveRecoverySetAsync(document, payload, reads, ct).ConfigureAwait(false);
             reads.ClearIdentityBody();
@@ -65,6 +74,7 @@ public partial class Par2RepairService
                 {
                     var id = layout.SegmentIds[index];
                     if (reads.UnavailableIds.Contains(id)) unavailableSlices.UnionWith(layout.Map.GlobalSlicesForSegment(index));
+                    if (reads.AuthenticationFailureIds.Contains(id)) accessor.NoteAuthenticationFailure(index);
                     if (reads.MissingIds.Contains(id)) accessor.NoteMissing(index);
                     if (reads.CorruptIds.Contains(id)) accessor.NoteCorrupt(index);
                 }

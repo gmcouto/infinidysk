@@ -69,6 +69,10 @@ public partial class Par2RepairService : BackgroundService
     private readonly ConcurrentDictionary<string, byte> _pendingZeroFillPaths = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, ConcurrentQueue<(string Id, bool IsCorruption)>> _pendingSegmentIds =
         new(StringComparer.Ordinal);
+    // Paths whose latest corrupt report was a yEnc authentication failure (INF-13):
+    // auth failure is not evidence about the provider copy, so it must never
+    // persist corrupt/missing marks. ProcessZeroFillEventAsync checks and clears.
+    private readonly ConcurrentDictionary<string, byte> _authFailurePaths = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<Guid, RetainedRepair> _retainedSegmentIds = new();
     private long _totalSucceeded;
     private long _totalFailed;
@@ -173,6 +177,35 @@ public partial class Par2RepairService : BackgroundService
         if (!_configManager.IsRepairJobEnabled()) return;
         AccumulateAndArm(path, segmentId, isCorruption: true);
     }
+
+    /// <summary>
+    /// INF-13 guard (plan §4.6): a yEnc authentication failure (wrong password /
+    /// tampered bytes) is classified apart from provider corruption. It persists
+    /// no <see cref="DavNzbFile.CorruptSegmentIndices"/> /
+    /// <see cref="DavNzbFile.MissingSegmentIndices"/> marks — the password itself
+    /// may be wrong, so a corrected password must read the file with no marks.
+    /// Phase 3's decoder wiring reports through here; the buffered provider-failover
+    /// exception is recognised by <see cref="YencAuthenticationException.IsAuthenticationFailure"/>.
+    /// </summary>
+    public void ReportAuthenticationFailure(string path, string segmentId)
+    {
+        if (string.IsNullOrEmpty(path) || string.IsNullOrEmpty(segmentId))
+            return;
+        if (!_configManager.IsRepairJobEnabled()) return;
+        _authFailurePaths[path] = 0;
+        AccumulateAndArm(path, segmentId, isCorruption: true);
+    }
+
+    /// <summary>
+    /// INF-13 classifier: whether draining <paramref name="reports"/> for one
+    /// file may persist corrupt/missing marks. False when any report in the
+    /// batch was an authentication failure — auth failure poisons the evidence
+    /// for the whole batch (the same articles cannot be judged corrupt while
+    /// the password itself may be wrong).
+    /// </summary>
+    internal static bool CanPersistDamageMarks(
+        bool isAuthenticationFailure, int missingCount, int corruptCount) =>
+        !isAuthenticationFailure && (missingCount > 0 || corruptCount > 0);
 
     private void AccumulateAndArm(string path, string segmentId, bool isCorruption)
     {
@@ -577,6 +610,9 @@ public partial class Par2RepairService : BackgroundService
     private async Task ProcessZeroFillEventAsync(ZeroFillEvent evt, CancellationToken ct)
     {
         var reports = DrainPendingSegmentReports(evt.Path);
+        // INF-13: an authentication failure in this batch suppresses every
+        // persistent corrupt/missing mark for the file (see ReportAuthenticationFailure).
+        var isAuthFailure = _authFailurePaths.TryRemove(evt.Path, out _);
 
         await using var dbContext = CreateContext();
         var dbClient = new DavDatabaseClient(dbContext);
@@ -658,7 +694,7 @@ public partial class Par2RepairService : BackgroundService
             }
         }
 
-        if (missingIndices.Count > 0 || corruptIndices.Count > 0)
+        if (CanPersistDamageMarks(isAuthFailure, missingIndices.Count, corruptIndices.Count))
         {
             await DavNzbFileBlobUpdater.MutateAsync(
                 davItem,
@@ -716,6 +752,22 @@ public partial class Par2RepairService : BackgroundService
 
     internal Task ProcessPendingReportsForTestsAsync(string path, CancellationToken ct) =>
         ProcessZeroFillEventAsync(new ZeroFillEvent(path), ct);
+
+    internal Task ProcessAuthenticationFailureForTestsAsync(string path, string segmentId, CancellationToken ct)
+    {
+        ReportAuthenticationFailure(path, segmentId);
+        return ProcessZeroFillEventAsync(new ZeroFillEvent(path), ct);
+    }
+
+    internal Task PersistDiscoveredDamageForTestsAsync(
+        DavItem davItem,
+        DavNzbFile nzbFile,
+        IReadOnlyCollection<int> missingIndices,
+        IReadOnlyCollection<int> corruptIndices,
+        bool isAuthenticationFailure,
+        CancellationToken ct) =>
+        PersistDiscoveredDamageAsync(
+            davItem, nzbFile, missingIndices, corruptIndices, isAuthenticationFailure, ct);
 
     private async Task ProcessQueueItemAsync(RepairWorkItem item, CancellationToken ct)
     {
@@ -1157,11 +1209,31 @@ public partial class Par2RepairService : BackgroundService
         DavItem davItem,
         DavNzbFile nzbFile,
         ResolvedSliceAccessor accessor,
+        CancellationToken ct) =>
+        await PersistDiscoveredDamageAsync(
+            davItem,
+            nzbFile,
+            accessor.MissingSegmentIndices,
+            accessor.CorruptSegmentIndices,
+            accessor.HasAuthenticationFailure(
+                accessor.MissingSegmentIndices, accessor.CorruptSegmentIndices),
+            ct).ConfigureAwait(false);
+
+    private async Task PersistDiscoveredDamageAsync(
+        DavItem davItem,
+        DavNzbFile nzbFile,
+        IReadOnlyCollection<int> missingIndices,
+        IReadOnlyCollection<int> corruptIndices,
+        bool isAuthenticationFailure,
         CancellationToken ct)
     {
-        var missing = accessor.MissingSegmentIndices.OrderBy(i => i).ToArray();
-        var corrupt = accessor.CorruptSegmentIndices.OrderBy(i => i).ToArray();
-        if (missing.Length == 0 && corrupt.Length == 0)
+        var missing = missingIndices.OrderBy(i => i).ToArray();
+        var corrupt = corruptIndices.OrderBy(i => i).ToArray();
+        // INF-13: only authentication-classified discoveries are suppressed
+        // (plan §4.6). Genuine PAR2-discovered damage on an encrypted file —
+        // confirmed against authenticated plaintext / provider misses — still
+        // records, mirroring the zero-fill path's CanPersistDamageMarks gate.
+        if (!CanPersistDamageMarks(isAuthenticationFailure, missing.Length, corrupt.Length))
             return;
 
         await DavNzbFileBlobUpdater.MutateAsync(

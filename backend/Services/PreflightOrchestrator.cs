@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using Microsoft.EntityFrameworkCore;
+using NzbWebDAV.Clients.Usenet.Contexts;
 using NzbWebDAV.Config;
 using NzbWebDAV.Database;
 using NzbWebDAV.Database.Models;
@@ -213,6 +214,13 @@ public class PreflightOrchestrator(
             if (mpf is null || !mpf.Metadata.IsLazy) return;
             if ((mpf.Metadata.PendingParts?.Length ?? 0) == 0) return;
 
+            // F6/INF-21: lazy pre-warm resolves trailing volumes by fetching
+            // their segments; an encrypted file's volumes only decrypt under
+            // its persisted scope (mirrors HealthCheckService /
+            // Par2RepairService.Execution). Without it the encrypted pre-warm
+            // silently no-ops (restore fails inside the resolver's catches).
+            using var encryptionScope = YencEncryptionRuntimeContext.BeginForFile(
+                mpf.Metadata.YencEncrypted, mpf.Metadata.YencTransportPassword);
             await lazyRarResolver.EnsureResolvedThroughAsync(mpf, long.MaxValue, ct).ConfigureAwait(false);
         }
         catch (OperationCanceledException)

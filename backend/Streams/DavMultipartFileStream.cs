@@ -37,6 +37,13 @@ public class DavMultipartFileStream : FastReadOnlyStream, IDeliveredBytesValidat
     // Cancels successor geometry probes when the inner stream generation they serve ends.
     private ContextualCancellationTokenSource? _generationCts;
 
+    // INF-21: persistence-agnostic encryption capture from the mounted
+    // file's persisted Meta, fail-closed at construction (encrypted blob
+    // without a password throws before any read). Null for ordinary files.
+    // Captured once so every part open and lazy resolution of this stream
+    // reuses one KDF cache; Activate(_encryptionRuntime) per read.
+    private readonly UsenetSharp.Encryption.YencEncryptionContext? _encryptionRuntime;
+
     public DavMultipartFileStream(
         DavMultipartFile mpf,
         INntpClient usenetClient,
@@ -47,6 +54,8 @@ public class DavMultipartFileStream : FastReadOnlyStream, IDeliveredBytesValidat
         InFlightArticleBudget? inFlightArticleBudget = null,
         int streamingBodyBatchWidth = 4)
     {
+        _encryptionRuntime = YencEncryptionRuntimeContext.CaptureForFile(
+            mpf.Metadata.YencEncrypted, mpf.Metadata.YencTransportPassword);
         _mpf = mpf;
         _usenetClient = usenetClient;
         _articleBufferSize = articleBufferSize;
@@ -87,6 +96,10 @@ public class DavMultipartFileStream : FastReadOnlyStream, IDeliveredBytesValidat
     {
         try
         {
+            // Background flow starts in the constructor, which cannot rely on
+            // the caller's ambient scope surviving; re-enter the captured
+            // runtime so lazy volume resolution decrypts like foreground reads.
+            using var encryption = YencEncryptionRuntimeContext.Activate(_encryptionRuntime);
             await _resolver!
                 .EnsureResolvedThroughAsync(_mpf, long.MaxValue, CancellationToken.None)
                 .ConfigureAwait(false);
@@ -111,6 +124,7 @@ public class DavMultipartFileStream : FastReadOnlyStream, IDeliveredBytesValidat
         Memory<byte> buffer,
         CancellationToken cancellationToken = default)
     {
+        using var encryption = YencEncryptionRuntimeContext.Activate(_encryptionRuntime);
         if (_pendingInnerDispose is { } pendingDispose)
         {
             _pendingInnerDispose = null;

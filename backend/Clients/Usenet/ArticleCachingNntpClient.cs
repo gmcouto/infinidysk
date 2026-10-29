@@ -69,6 +69,14 @@ public class ArticleCachingNntpClient(
     public override async Task<UsenetDecodedBodyResponse> DecodedBodyAsync(
         SegmentId segmentId, ArticleBodyCompletionHandler? onConnectionReadyAgain, CancellationToken cancellationToken)
     {
+        // INF-17 audit: this cache stores decoded bodies. Under an encryption
+        // context the inner stream is authenticated plaintext, but a cache
+        // entry carries no proof of which context/password produced it, so
+        // reads and writes bypass exactly like the segment cache (v1 rule).
+        if (YencEncryptionRuntimeContext.IsActive)
+            return await base.DecodedBodyAsync(segmentId, onConnectionReadyAgain, cancellationToken)
+                .ConfigureAwait(false);
+
         var semaphore = _pendingRequests.GetOrAdd(segmentId, _ => new SemaphoreSlim(1, 1));
 
         try
@@ -123,6 +131,10 @@ public class ArticleCachingNntpClient(
         ArticleBodyCompletionHandler? onConnectionReadyAgain,
         CancellationToken cancellationToken)
     {
+        if (YencEncryptionRuntimeContext.IsActive)
+            return await base.DecodedBodiesAsync(segmentIds, onConnectionReadyAgain, cancellationToken)
+                .ConfigureAwait(false);
+
         var partition = PartitionBatch(segmentIds);
         if (partition.Missing.Count == 0)
         {
@@ -145,6 +157,10 @@ public class ArticleCachingNntpClient(
     public override async Task<UsenetDecodedArticleResponse> DecodedArticleAsync(
         SegmentId segmentId, ArticleBodyCompletionHandler? onConnectionReadyAgain, CancellationToken cancellationToken)
     {
+        if (YencEncryptionRuntimeContext.IsActive)
+            return await base.DecodedArticleAsync(segmentId, onConnectionReadyAgain, cancellationToken)
+                .ConfigureAwait(false);
+
         var semaphore = _pendingRequests.GetOrAdd(segmentId, _ => new SemaphoreSlim(1, 1));
 
         try
@@ -279,6 +295,10 @@ public class ArticleCachingNntpClient(
         CancellationToken cancellationToken
     )
     {
+        if (YencEncryptionRuntimeContext.IsActive)
+            return await base.DecodedBodiesAsync(segmentIds, exclusiveConnection, cancellationToken)
+                .ConfigureAwait(false);
+
         var partition = PartitionBatch(segmentIds);
         if (partition.Missing.Count == 0)
         {
@@ -316,6 +336,14 @@ public class ArticleCachingNntpClient(
         int depth,
         [EnumeratorCancellation] CancellationToken cancellationToken)
     {
+        if (YencEncryptionRuntimeContext.IsActive)
+        {
+            await foreach (var passthrough in base.DecodedArticlesPipelinedAsync(segmentIds, depth, cancellationToken)
+                               .ConfigureAwait(false))
+                yield return passthrough;
+            yield break;
+        }
+
         await foreach (var article in base.DecodedArticlesPipelinedAsync(segmentIds, depth, cancellationToken)
                            .ConfigureAwait(false))
         {
@@ -366,7 +394,8 @@ public class ArticleCachingNntpClient(
 
     public override Task<UsenetYencHeader> GetYencHeadersAsync(string segmentId, CancellationToken ct)
     {
-        return _cachedSegments.TryGetValue(segmentId, out var existingEntry)
+        return !YencEncryptionRuntimeContext.IsActive
+               && _cachedSegments.TryGetValue(segmentId, out var existingEntry)
             ? Task.FromResult(existingEntry.YencHeaders)
             : base.GetYencHeadersAsync(segmentId, ct);
     }

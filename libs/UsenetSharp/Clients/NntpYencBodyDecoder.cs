@@ -3,6 +3,7 @@ using System.Buffers.Text;
 using System.IO.Pipelines;
 using System.Text;
 using RapidYencSharp;
+using UsenetSharp.Encryption;
 using UsenetSharp.Exceptions;
 using UsenetSharp.Models;
 using UsenetSharp.Streams;
@@ -15,7 +16,8 @@ internal sealed class NntpYencBodyDecoder(
     TaskCompletionSource<UsenetYencHeader?> headersCompletion,
     DecodedBodyReadStream decodedStream,
     UsenetClientOptions options,
-    int flushThreshold)
+    int flushThreshold,
+    YencEncryptionContext? encryptionContext = null)
 {
     private enum BodyPhase
     {
@@ -26,6 +28,202 @@ internal sealed class NntpYencBodyDecoder(
     }
 
     public async Task ReadAsync(
+        CoalescedReadTimeout readTimeout,
+        CancellationToken cancellationToken = default)
+    {
+        // Encrypted articles are restored and authenticated before any byte is
+        // released: buffer this one segment, open it, then serve plaintext.
+        if (encryptionContext is not null)
+        {
+            await ReadEncryptedAsync(readTimeout, cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        await ReadPlainAsync(readTimeout, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task ReadEncryptedAsync(
+        CoalescedReadTimeout readTimeout,
+        CancellationToken cancellationToken)
+    {
+        var rawLines = new List<byte[]>();
+        long accumulatedBytes = 0;
+        var pendingObservedBytes = 0;
+        try
+        {
+            while (true)
+            {
+                NntpReadBuffer? batch;
+                try
+                {
+                    batch = await ReadCompleteLinesAsync(readTimeout).ConfigureAwait(false);
+                }
+                catch (IOException)
+                {
+                    throw new UsenetProtocolException(
+                        "The NNTP connection closed before the article body terminator was received.");
+                }
+
+                if (!batch.HasValue)
+                {
+                    throw new UsenetProtocolException(
+                        "The NNTP connection closed before the article body terminator was received.");
+                }
+
+                var span = batch.Value.Memory.Span;
+                var offset = 0;
+                var consume = 0;
+                var hitTerminator = false;
+                try
+                {
+                    while (TryReadLine(
+                        span,
+                        ref offset,
+                        out var rawStart,
+                        out var rawLength,
+                        out var contentStart,
+                        out var contentLength))
+                    {
+                        var rawLine = span.Slice(rawStart, rawLength);
+                        var content = span.Slice(contentStart, contentLength);
+                        consume = rawStart + rawLength;
+                        if (contentLength == 1 && content[0] == (byte)'.')
+                        {
+                            hitTerminator = true;
+                            break;
+                        }
+
+                        PayloadBytesObserver.Accumulate(
+                            options.PayloadBytesObserver,
+                            ref pendingObservedBytes,
+                            contentLength + 2);
+                        // Dot-unstuffing mirrors the raw BODY path (leading
+                        // ".." loses its first dot); headers/data keep CRLF.
+                        var stored = contentLength >= 1 && content[0] == (byte)'.'
+                            && rawLine.Length >= 2 && rawLine[0] == (byte)'.' && rawLine[1] == (byte)'.'
+                            ? rawLine[1..].ToArray()
+                            : rawLine.ToArray();
+                        // F5: one segment may be buffered for authentication,
+                        // never an unbounded "article" — reuse the plain path's
+                        // drain ceiling (options.AbandonedBodyDrainLimit). An
+                        // oversized copy is provider corruption: fail over with
+                        // zero bytes released (nothing has been written yet).
+                        accumulatedBytes += stored.Length;
+                        if (accumulatedBytes > options.AbandonedBodyDrainLimit)
+                        {
+                            throw new YencEncryptionFailoverException(
+                                "Encrypted article exceeds the configured one-segment accumulation limit.");
+                        }
+
+                        rawLines.Add(stored);
+                    }
+                }
+                finally
+                {
+                    if (consume > 0)
+                    {
+                        reader.Advance(consume);
+                    }
+                }
+
+                if (hitTerminator)
+                {
+                    break;
+                }
+
+                cancellationToken.ThrowIfCancellationRequested();
+            }
+        }
+        finally
+        {
+            PayloadBytesObserver.Flush(options.PayloadBytesObserver, ref pendingObservedBytes);
+        }
+
+        var article = ConcatLines(rawLines);
+        // Restore + grammar + dual-salt/index validation run before the KDF
+        // where the grammar alone suffices, and before any byte is written.
+        var restored = YencControlRestorer.Restore(encryptionContext!, article);
+        var stripped = YencControlRestorer.RemoveYencryptionLine(restored.RestoredBlock);
+        var lines = YencControlRestorer.SplitLinesPreservingEndings(stripped);
+        while (lines.Count > 0 && YencControlRestorer.SplitEnding(lines[^1]).Content.Length == 0)
+            lines.RemoveAt(lines.Count - 1);
+        if (lines.Count < 2)
+            throw new YencEncryptionFailoverException("Encrypted article has no =yend trailer.");
+
+        var ybeginContent = YencControlRestorer.SplitEnding(lines[0]).Content;
+        var isMultipart = restored.Geometry.IsMultipart;
+        var ypartContent = isMultipart
+            ? YencControlRestorer.SplitEnding(lines[1]).Content
+            : Array.Empty<byte>();
+        var headers = EncryptedYencAssembler.ParseRestoredHeaders(
+            ybeginContent, ypartContent, restored);
+
+        var footerContent = YencControlRestorer.SplitEnding(lines[^1]).Content;
+        if (!YencStream.StartsWithYEnd(footerContent))
+            throw new YencEncryptionFailoverException("Encrypted article has no =yend trailer.");
+
+        // Ordinary yEnc data decode (ciphertext) + wire CRC over ciphertext.
+        var ciphertext = DecodeEncryptedDataLines(lines, isMultipart ? 2 : 1);
+        EncryptedYencAssembler.CheckCiphertextCrc(footerContent, isMultipart, ciphertext);
+
+        var opened = EncryptedYencAssembler.Open(
+            encryptionContext!,
+            new EncryptedYencAssembler.DecodedCiphertext(ciphertext, restored, headers));
+        var plaintext = opened.Plaintext;
+
+        // F1: headers are published ONLY after the AEAD open succeeds.
+        // Publishing the restored (unauthenticated) geometry earlier would let
+        // GetYencHeadersAsync — and HeaderCachingNntpClient above it — cache
+        // header geometry from a tampered/ciphertext-corrupt article that
+        // merely has a valid password. The plain path below is untouched.
+        headersCompletion.TrySetResult(opened.Headers);
+
+        if (options.PayloadBandwidthAcquirer is { } acquire)
+        {
+            await acquire(plaintext.Length, cancellationToken).ConfigureAwait(false);
+        }
+
+        var destination = writer.GetSpan(plaintext.Length);
+        plaintext.CopyTo(destination);
+        decodedStream.AddBufferedBytes(plaintext.Length);
+        writer.Advance(plaintext.Length);
+        await writer.FlushAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static byte[] ConcatLines(List<byte[]> lines)
+    {
+        var total = 0;
+        foreach (var line in lines)
+            total += line.Length;
+        var result = new byte[total];
+        var offset = 0;
+        foreach (var line in lines)
+        {
+            line.CopyTo(result, offset);
+            offset += line.Length;
+        }
+
+        return result;
+    }
+
+    private static byte[] DecodeEncryptedDataLines(List<byte[]> lines, int dataStart)
+    {
+        using var output = new MemoryStream();
+        RapidYencDecoderState? state = RapidYencDecoderState.RYDEC_STATE_CRLF;
+        for (var i = dataStart; i < lines.Count - 1; i++)
+        {
+            var raw = lines[i];
+            if (raw.Length == 0)
+                continue;
+            var chunk = new byte[raw.Length];
+            var written = YencDecoder.DecodeEx(raw, chunk, ref state, isRaw: true);
+            output.Write(chunk, 0, written);
+        }
+
+        return output.ToArray();
+    }
+
+    private async Task ReadPlainAsync(
         CoalescedReadTimeout readTimeout,
         CancellationToken cancellationToken = default)
     {

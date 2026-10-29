@@ -106,7 +106,10 @@ public sealed class SegmentCacheNntpClient : WrappingNntpClient
     public override async Task<UsenetDecodedBodyResponse> DecodedBodyAsync(
         SegmentId segmentId, ArticleBodyCompletionHandler? onConnectionReadyAgain, CancellationToken ct)
     {
-        if (MultiProviderNntpClient.AttributionContext.Value != null)
+        // INF-17 cache bypass: cached bytes are ciphertext without control
+        // lines and cannot be re-authenticated from the entry alone.
+        if (YencEncryptionRuntimeContext.IsActive ||
+            MultiProviderNntpClient.AttributionContext.Value != null)
             return await base.DecodedBodyAsync(segmentId, onConnectionReadyAgain, ct).ConfigureAwait(false);
 
         var local = TryOpenCacheResponse(segmentId, ct);
@@ -123,6 +126,9 @@ public sealed class SegmentCacheNntpClient : WrappingNntpClient
     public override async Task<UsenetDecodedBodyResponse?> TryGetLocalDecodedBodyAsync(
         SegmentId segmentId, CancellationToken ct)
     {
+        if (YencEncryptionRuntimeContext.IsActive)
+            return null;
+
         if (MultiProviderNntpClient.AttributionContext.Value == null)
         {
             var local = TryOpenCacheResponse(segmentId, ct);
@@ -136,7 +142,8 @@ public sealed class SegmentCacheNntpClient : WrappingNntpClient
     public override async Task<UsenetDecodedBodyResponse> DecodedBodyAsync(
         SegmentId segmentId, UsenetExclusiveConnection exclusiveConnection, CancellationToken ct)
     {
-        if (MultiProviderNntpClient.AttributionContext.Value != null)
+        if (YencEncryptionRuntimeContext.IsActive ||
+            MultiProviderNntpClient.AttributionContext.Value != null)
             return await base.DecodedBodyAsync(segmentId, exclusiveConnection, ct).ConfigureAwait(false);
 
         var local = TryOpenCacheResponse(segmentId, ct);
@@ -156,7 +163,8 @@ public sealed class SegmentCacheNntpClient : WrappingNntpClient
         ArticleBodyCompletionHandler? onConnectionReadyAgain,
         CancellationToken cancellationToken)
     {
-        if (MultiProviderNntpClient.AttributionContext.Value is not null)
+        if (YencEncryptionRuntimeContext.IsActive ||
+            MultiProviderNntpClient.AttributionContext.Value is not null)
         {
             _statistics.RecordBatchBypass(segmentIds.Count);
             return base.DecodedBodiesAsync(segmentIds, onConnectionReadyAgain, cancellationToken);
@@ -176,7 +184,8 @@ public sealed class SegmentCacheNntpClient : WrappingNntpClient
         UsenetExclusiveConnection exclusiveConnection,
         CancellationToken cancellationToken)
     {
-        if (MultiProviderNntpClient.AttributionContext.Value is not null)
+        if (YencEncryptionRuntimeContext.IsActive ||
+            MultiProviderNntpClient.AttributionContext.Value is not null)
         {
             _statistics.RecordBatchBypass(segmentIds.Count);
             return base.DecodedBodiesAsync(segmentIds, exclusiveConnection, cancellationToken);

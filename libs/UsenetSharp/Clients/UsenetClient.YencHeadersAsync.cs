@@ -71,8 +71,13 @@ public partial class UsenetClient
             UsenetYencHeader? header;
             try
             {
-                header = await ReadYencHeaderProbeAsync(releasePolicy, operationCts.Token)
-                    .ConfigureAwait(false);
+                // Encrypted probes authenticate the whole segment before any
+                // header is reported (INF-16/INF-17 post-auth headers only).
+                var encryptionContext = _options.YencEncryptionProvider?.Invoke();
+                header = encryptionContext is not null
+                    ? await ReadEncryptedHeaderProbeAsync(encryptionContext, operationCts.Token).ConfigureAwait(false)
+                    : await ReadYencHeaderProbeAsync(releasePolicy, operationCts.Token)
+                        .ConfigureAwait(false);
             }
             catch (Exception e) when (e is not OutOfMemoryException)
             {
@@ -94,6 +99,49 @@ public partial class UsenetClient
         {
             _commandLock.Release();
         }
+    }
+
+    private async Task<UsenetYencHeader?> ReadEncryptedHeaderProbeAsync(
+        UsenetSharp.Encryption.YencEncryptionContext context,
+        CancellationToken cancellationToken)
+    {
+        // F4: the provider was already evaluated once by the caller
+        // (UsenetClientOptions: "Evaluated once at each ... entry point");
+        // this probe must use that snapshot, never re-invoke the provider.
+        using var readTimeout = new CoalescedReadTimeout(_options.ReadTimeout, _timeProvider, cancellationToken);
+        using var article = new MemoryStream();
+        while (true)
+        {
+            ReadOnlyMemory<byte>? lineMemory;
+            try
+            {
+                lineMemory = await ReadLineBytesAsync(readTimeout).ConfigureAwait(false);
+            }
+            catch (IOException)
+            {
+                throw new UsenetProtocolException(
+                    "The NNTP connection closed before the article body terminator was received.");
+            }
+
+            if (!lineMemory.HasValue)
+            {
+                throw new UsenetProtocolException(
+                    "The NNTP connection closed before the article body terminator was received.");
+            }
+
+            var line = lineMemory.Value;
+            if (line.Length == 1 && line.Span[0] == (byte)'.')
+                break;
+            // ReadLineBytesAsync strips CR; stored lines keep CRLF for restore.
+            var span = line.Span;
+            if (span.Length >= 2 && span[0] == (byte)'.' && span[1] == (byte)'.')
+                span = span[1..];
+            article.Write(span);
+            article.Write("\r\n"u8);
+        }
+
+        var opened = Encryption.EncryptedYencAssembler.OpenArticle(context, article.ToArray());
+        return opened.Headers;
     }
 
     private async Task<UsenetYencHeader?> ReadYencHeaderProbeAsync(

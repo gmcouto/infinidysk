@@ -1335,6 +1335,11 @@ public class HealthCheckService : BackgroundService, IHealthCheckQuiescence
 
             var segments = payload.Segments;
             var nzbFile = payload.NzbFile;
+            // INF-21: BODY-level probes of this check run under the item's
+            // persisted encryption scope; STAT-only paths are unaffected
+            // (STAT never decodes). Disposed with this check's async flow.
+            using var encryptionScope = YencEncryptionRuntimeContext.BeginForFile(
+                payload.YencEncrypted, payload.YencTransportPassword);
 
             // update the release date, if null
             if (davItem.ReleaseDate == null)
@@ -1906,12 +1911,18 @@ public class HealthCheckService : BackgroundService, IHealthCheckQuiescence
         // do not seed the fail-fast reimport cache (a re-grab of a release we chose to keep
         // must not fail), and do not clear the streaming-failure count: confirmed damage is
         // not health, and real playback failures keep escalating toward auto-remove.
-        var missingToStore = missingIndices.Count == 0
-            ? null
-            : missingIndices.Distinct().OrderBy(index => index).ToArray();
-        var corruptToStore = corruptIndices.Count == 0
-            ? null
-            : corruptIndices.Distinct().OrderBy(index => index).ToArray();
+        var (missingToStore, corruptToStore) = nzbFile.YencEncrypted == true
+            // INF-13 (plan §4.6): an encrypted file's degraded verdict must not persist
+            // NEW missing/corrupt marks — the holes may only reflect an unauthenticated
+            // read (the password itself may be wrong). Keep any pre-existing record
+            // untouched; the clear paths above still wipe it on a clean/repaired sweep.
+            ? (nzbFile.MissingSegmentIndices, nzbFile.CorruptSegmentIndices)
+            : (missingIndices.Count == 0
+                    ? null
+                    : missingIndices.Distinct().OrderBy(index => index).ToArray(),
+                corruptIndices.Count == 0
+                    ? null
+                    : corruptIndices.Distinct().OrderBy(index => index).ToArray());
         var recordChanged = !SameIndexRecord(nzbFile.MissingSegmentIndices, missingToStore)
                             || !SameIndexRecord(nzbFile.CorruptSegmentIndices, corruptToStore)
                             || (probedClass != null && nzbFile.ContainerClass != probedClass)
@@ -2788,7 +2799,11 @@ public class HealthCheckService : BackgroundService, IHealthCheckQuiescence
                     [
                         new HealthSegmentPart(nzbFile.SegmentIds, nzbFile.SegmentFallbackIds),
                     ]),
-                    nzbFile);
+                    nzbFile)
+                {
+                    YencEncrypted = nzbFile.YencEncrypted,
+                    YencTransportPassword = nzbFile.YencTransportPassword,
+                };
         }
 
         if (davItem.SubType == DavItem.ItemSubType.RarFile)
@@ -2814,7 +2829,11 @@ public class HealthCheckService : BackgroundService, IHealthCheckQuiescence
                         multipartFile.Metadata.FileParts
                             .Select(part => new HealthSegmentPart(part.SegmentIds, part.SegmentFallbackIds))
                             .ToArray()),
-                    null);
+                    null)
+                {
+                    YencEncrypted = multipartFile.Metadata.YencEncrypted,
+                    YencTransportPassword = multipartFile.Metadata.YencTransportPassword,
+                };
         }
 
         return new HealthCheckPayload(new ConcatenatedSegmentView(Array.Empty<HealthSegmentPart>()), null);
@@ -2822,7 +2841,14 @@ public class HealthCheckService : BackgroundService, IHealthCheckQuiescence
 
     private readonly record struct HealthCheckPayload(
         ConcatenatedSegmentView Segments,
-        DavNzbFile? NzbFile);
+        DavNzbFile? NzbFile)
+    {
+        // INF-21/22: persisted transport-encryption context of the checked
+        // item, so BODY-level health probes decrypt instead of classifying
+        // ciphertext as corruption. Null = ordinary.
+        public bool? YencEncrypted { get; init; }
+        public string? YencTransportPassword { get; init; }
+    }
 
     /// <summary>
     /// A sampled projection that retains its original segment indexes. The projection only

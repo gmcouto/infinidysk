@@ -1,4 +1,5 @@
 ﻿using NzbWebDAV.Clients.Usenet;
+using NzbWebDAV.Clients.Usenet.Contexts;
 using NzbWebDAV.Models;
 using NzbWebDAV.Utils;
 using UsenetSharp.Streams;
@@ -10,6 +11,11 @@ public class MultipartFileStream(MultipartFile multipartFile, INntpClient usenet
     private long _position;
     private bool _isDisposed;
     private Stream? _currentStream;
+    // INF-21: persistence-agnostic capture — the 7z processor wraps
+    // construction+reads in the item's encryption scope; captured here so
+    // lazily opened part streams decrypt even if that scope is disposed.
+    private readonly UsenetSharp.Encryption.YencEncryptionContext? _encryptionRuntime =
+        YencEncryptionRuntimeContext.Capture();
 
     public override bool CanSeek => true;
     public override long Length => multipartFile.FileSize;
@@ -22,6 +28,7 @@ public class MultipartFileStream(MultipartFile multipartFile, INntpClient usenet
 
     public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
     {
+        using var encryption = YencEncryptionRuntimeContext.Activate(_encryptionRuntime);
         if (buffer.Length == 0) return 0;
         while (_position < Length && !cancellationToken.IsCancellationRequested)
         {

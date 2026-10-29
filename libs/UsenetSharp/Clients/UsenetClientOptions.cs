@@ -1,4 +1,5 @@
 using System.Security.Cryptography.X509Certificates;
+using UsenetSharp.Encryption;
 
 namespace UsenetSharp.Clients;
 
@@ -154,6 +155,16 @@ public sealed record UsenetClientOptions
     /// </remarks>
     public X509RevocationMode CertificateRevocationCheckMode { get; init; } =
         X509RevocationMode.NoCheck;
+
+    /// <summary>
+    /// Optional per-operation yEnc encryption hook. Evaluated once at each
+    /// decoded-body entry point (<c>DecodedBodyAsync</c>/<c>DecodedArticleAsync</c>
+    /// context is snapshotted for that body) — never stored as mutable state on
+    /// a pooled client. Returns the runtime context to use for that body, or
+    /// <see langword="null"/> for ordinary unencrypted decoding. When unset or
+    /// returning null, decoding is byte-identical to upstream behaviour.
+    /// </summary>
+    public Func<YencEncryptionContext?>? YencEncryptionProvider { get; init; }
 
     /// <summary>
     /// Gets whether TLS certificate chain and hostname validation is bypassed.

@@ -37,6 +37,10 @@ public partial class Par2RepairService
         public HashSet<string> UnavailableIds { get; } = new(StringComparer.Ordinal);
         public HashSet<string> MissingIds { get; } = new(StringComparer.Ordinal);
         public HashSet<string> CorruptIds { get; } = new(StringComparer.Ordinal);
+        // INF-13: ids whose unavailability was classified as a yEnc authentication
+        // failure (plan §4.6) — not evidence about the provider copy once the
+        // password itself may be wrong, so these never persist damage marks.
+        public HashSet<string> AuthenticationFailureIds { get; } = new(StringComparer.Ordinal);
         public Dictionary<NzbFile, LongRange[]> VolumeRanges { get; } = new(ReferenceEqualityComparer.Instance);
         public HashSet<NzbFile> ParityFiles { get; } = new(ReferenceEqualityComparer.Instance);
         public HashSet<NzbFile> ExaminedFiles { get; } = new(ReferenceEqualityComparer.Instance);
@@ -101,6 +105,8 @@ public partial class Par2RepairService
         public void NoteUnavailable(string id, Exception exception)
         {
             UnavailableIds.Add(id);
+            if (YencAuthenticationException.IsAuthenticationFailure(exception))
+                AuthenticationFailureIds.Add(id);
             if (exception.TryGetCausingException<UsenetArticleNotFoundException>(out _)) MissingIds.Add(id);
             else CorruptIds.Add(id);
         }

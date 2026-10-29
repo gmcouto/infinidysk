@@ -152,6 +152,9 @@ public partial class UsenetClient
 
             if (responseCode == (int)UsenetResponseType.ArticleRetrievedBodyFollows)
             {
+                // Per-operation snapshot (INF-14): pooled clients never store
+                // a password; the provider is evaluated once here.
+                var encryptionContext = _options.YencEncryptionProvider?.Invoke();
                 var pipe = new Pipe(_decodedBodyPipeOptions);
                 var decodedStream = new DecodedBodyReadStream(
                     pipe.Reader.AsStream(), AdjustBufferedDecodedBodyBytes);
@@ -167,7 +170,8 @@ public partial class UsenetClient
                                     operationCts,
                                     onConnectionReadyAgain,
                                     decodedStream,
-                                    callerCancellationToken: cancellationToken);
+                                    callerCancellationToken: cancellationToken,
+                                    encryptionContext: encryptionContext);
 #pragma warning restore CA2025
                 operationCts = null;
 
@@ -213,6 +217,7 @@ public partial class UsenetClient
         DecodedBodyReadStream decodedStream,
         bool releaseCommandLock = true,
         CoalescedReadTimeout? sharedReadTimeout = null,
+        Encryption.YencEncryptionContext? encryptionContext = null,
         CancellationToken callerCancellationToken = default)
     {
         Exception? failure = null;
@@ -239,7 +244,8 @@ public partial class UsenetClient
                 headersCompletion,
                 decodedStream,
                 _options,
-                DecodedBodyChunkSize);
+                DecodedBodyChunkSize,
+                encryptionContext);
 
             await decoder.ReadAsync(readTimeout, operationCts.Token).ConfigureAwait(false);
         }

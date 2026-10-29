@@ -20,6 +20,10 @@ namespace NzbWebDAV.Clients.Usenet;
 /// name); on overflow it is cleared rather than evicted one-by-one, which is cheap and rare
 /// given the high cap.
 /// </para>
+/// Under an active yEnc-encryption context the headers reaching this cache
+/// come from the decrypting decode (restored, plaintext-world, post-
+/// authentication — plan §4.3.7), so seek probes may reuse them; a failed
+/// authentication throws before any entry is written.
 /// </summary>
 public class HeaderCachingNntpClient(INntpClient usenetClient) : WrappingNntpClient(usenetClient)
 {
@@ -30,6 +34,11 @@ public class HeaderCachingNntpClient(INntpClient usenetClient) : WrappingNntpCli
 
     public override async Task<UsenetYencHeader> GetYencHeadersAsync(string segmentId, CancellationToken ct)
     {
+        // INF-17: under an encryption context a cached header is only valid
+        // if it was produced post-authentication. The base fetch authenticates
+        // before reporting headers, so serving the memo is safe; a failed
+        // probe throws before anything is cached (wrong password caches
+        // nothing).
         if (_cache.TryGetValue(segmentId, out var cached))
         {
             if (YencFileValidationContext.MatchesExpectedFile(cached, segmentId))
