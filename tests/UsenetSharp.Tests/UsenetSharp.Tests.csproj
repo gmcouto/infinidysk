@@ -32,4 +32,13 @@
     <ProjectReference Include="..\..\libs\UsenetSharp\UsenetSharp.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <None Update="TestFixtures\**\*.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Update="TestFixtures\EncryptedArticles\*.bin">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
 </Project>
