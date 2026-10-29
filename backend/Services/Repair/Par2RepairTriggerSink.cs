@@ -45,6 +45,18 @@ public sealed class Par2RepairTriggerSink
         Current?.OnCorruptionReported(path, segmentId);
     }
 
+    /// <summary>
+    /// INF-13: reports a yEnc authentication failure (wrong password / tampered
+    /// bytes). Unlike <see cref="ReportCorruption"/>, this never persists
+    /// corrupt/missing marks — see Par2RepairService.ReportAuthenticationFailure.
+    /// Phase 3's decoder wiring calls this on the auth-failure path.
+    /// </summary>
+    public static void ReportAuthenticationFailure(string path, string segmentId)
+    {
+        TestReports?.Add((path, segmentId, true));
+        Current?._service.ReportAuthenticationFailure(path, segmentId);
+    }
+
     private void OnCorruptionReported(string path, string segmentId)
     {
         _service.ReportCorruption(path, segmentId);

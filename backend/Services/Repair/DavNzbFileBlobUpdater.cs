@@ -111,5 +111,9 @@ internal static class DavNzbFileBlobUpdater
         CriticalHeadEndExclusive = source.CriticalHeadEndExclusive,
         CorruptSegmentIndices = source.CorruptSegmentIndices,
         SegmentByteRangesTrusted = source.SegmentByteRangesTrusted,
+        VerificationProof = source.VerificationProof,
+        // Same blob's transport-encryption context rides every rewrite (INF-12).
+        YencEncrypted = source.YencEncrypted,
+        YencTransportPassword = source.YencTransportPassword,
     };
 }

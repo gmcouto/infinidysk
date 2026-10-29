@@ -113,7 +113,7 @@ public sealed class SupportPackService(
     {
         var generatedAt = DateTimeOffset.UtcNow;
         var config = configManager.GetDiagnosticSnapshot();
-        var redactor = new SupportPackRedactor(CollectSecrets(config));
+        var redactor = new SupportPackRedactor(CollectSecrets(config).Concat(CollectTransportPasswords()));
         var logSnapshot = logBuffer.Snapshot(logBuffer.Capacity, null, null, null, null);
         var warningSink = warningLogBuffer.Sink;
         var warningSnapshot = warningSink.Snapshot(warningSink.Capacity, null, null, null, null);
@@ -1425,6 +1425,57 @@ public sealed class SupportPackService(
         yield return Environment.GetEnvironmentVariable("FRONTEND_BACKEND_API_KEY");
         yield return Environment.GetEnvironmentVariable("WEBDAV_PASSWORD");
         yield return Environment.GetEnvironmentVariable("SESSION_KEY");
+    }
+
+    /// <summary>
+    /// INF-12: persisted yEnc transport passwords (DavNzbFile orders 10/11,
+    /// DavMultipartFile.Meta orders 7/8) join the redactor's literal secrets, so
+    /// a marker transport password can never appear in a generated pack — via
+    /// logs today, or via any future section that embeds blob data. Best effort:
+    /// a pack must still generate when the blob store is unreadable.
+    /// </summary>
+    private static IEnumerable<string?> CollectTransportPasswords()
+    {
+        // The persisted context lives in MemoryPack blobs (DavNzbFile orders
+        // 10/11, DavMultipartFile.Meta orders 7/8); the EF rows are shells, so
+        // follow each DavItem's FileBlobId. Best effort: a pack must still
+        // generate when the blob store is unreadable.
+        List<Guid> blobIds;
+        try
+        {
+            using var db = new DavDatabaseContext();
+            blobIds = db.Items.AsNoTracking()
+                .Where(item => item.FileBlobId != null
+                    && (item.SubType == DavItem.ItemSubType.NzbFile
+                        || item.SubType == DavItem.ItemSubType.MultipartFile
+                        || item.SubType == DavItem.ItemSubType.RarFile))
+                .Select(item => item.FileBlobId!.Value)
+                .ToList();
+        }
+        catch (Exception e) when (e is not OutOfMemoryException)
+        {
+            Log.Debug(e, "Support pack: could not list file blobs for redaction");
+            yield break;
+        }
+
+        foreach (var blobId in blobIds)
+        {
+            string? password = null;
+            try
+            {
+                password = BlobStore.ReadBlob<DavNzbFile>(blobId).GetAwaiter().GetResult()
+                    ?.YencTransportPassword;
+                password ??= BlobStore.ReadBlob<DavMultipartFile>(blobId).GetAwaiter().GetResult()
+                    ?.Metadata?.YencTransportPassword;
+            }
+            catch (Exception e) when (e is not OutOfMemoryException)
+            {
+                Log.Debug(e, "Support pack: could not read a file blob for redaction");
+            }
+
+            if (!string.IsNullOrEmpty(password))
+                yield return password;
+        }
     }
 
     private static IEnumerable<string> CollectJsonSecrets(JsonElement element, string? propertyName = null)

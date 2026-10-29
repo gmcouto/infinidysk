@@ -11,6 +11,15 @@ public abstract class BaseAggregator
     protected abstract DavDatabaseClient DBClient { get; }
     protected abstract DavItem MountDirectory { get; }
 
+    /// <summary>
+    /// yEnc transport-encryption context for this import (INF-10/11). Set by
+    /// <see cref="QueueItemProcessor"/> so mounted blobs persist the resolved
+    /// context; defaults to <see cref="YencEncryptionContext.None"/> (ordinary),
+    /// which is also what every pre-existing call site gets. Aggregators write
+    /// it at mount; they never read or log the password.
+    /// </summary>
+    public YencEncryptionContext Encryption { get; set; } = YencEncryptionContext.None;
+
     private static readonly char[] DirectorySeparators =
     [
         Path.DirectorySeparatorChar,

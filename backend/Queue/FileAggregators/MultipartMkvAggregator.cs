@@ -35,7 +35,9 @@ public class MultipartMkvAggregator(
                 Id = Guid.NewGuid(),
                 Metadata = new DavMultipartFile.Meta()
                 {
-                    FileParts = fileParts.ToArray()
+                    FileParts = fileParts.ToArray(),
+                    YencEncrypted = Encryption.Encrypted ? true : null,
+                    YencTransportPassword = Encryption.Encrypted ? Encryption.TransportPassword : null,
                 }
             };
 

@@ -518,6 +518,27 @@ public class QueueItemProcessor(
         var archivePassword = FilenameUtil.GetNzbPassword(queueItem.FileName) ??
             nzb.Metadata.GetValueOrDefault("password");
 
+        // yEnc transport encryption (Body §8, plan §4.1): only the
+        // yenc_encrypted marker enables it; a password without the marker
+        // stays an archive password only. An encrypted NZB with invalid
+        // marker metadata or no resolvable transport password fails closed
+        // here — before any article fetch — via NonRetryableDownloadException
+        // and the existing failed-history lifecycle. The transport password is
+        // carried separately from archivePassword (plan §4.2); never logged.
+        var encryption = YencEncryptionContext.FromMetadata(
+            nzb.Metadata, FilenameUtil.GetNzbPassword(queueItem.FileName));
+
+        // INF-22: every body/header-fetching stage of this item (first-segment
+        // probes, PAR2 descriptors, file processors, readiness, health STATs)
+        // runs under the item's encryption scope so encrypted articles
+        // restore+authenticate before any parser sees them. The scope spans
+        // ProcessQueueItemAsync's stages; stream objects constructed inside
+        // capture the runtime (INF-21) so WebDAV reads later are unaffected
+        // by this scope's disposal. Ordinary NZBs install an inert scope
+        // (runtime null): byte-identical behaviour.
+        using var encryptionScope = YencEncryptionRuntimeContext.Begin(
+            encryption is { Encrypted: true } ? encryption.TransportPassword : null);
+
         // step 0 -- perform article existence pre-check against cache
         // https://github.com/infinidysk/infinidysk/issues/101
         var articlesToPrecheck = nzbFiles.SelectMany(x => x.Segments).Select(x => x.MessageId);
@@ -747,10 +768,10 @@ public class QueueItemProcessor(
             var categoryFolder = await GetOrCreateCategoryFolder().ConfigureAwait(false);
             var mountFolder = await CreateMountFolder(categoryFolder, existingMountFolder, duplicateNzbBehavior)
                 .ConfigureAwait(false);
-            new RarAggregator(dbClient, mountFolder, checkedFullHealth).UpdateDatabase(fileProcessingResults);
-            new FileAggregator(dbClient, mountFolder, checkedFullHealth).UpdateDatabase(fileProcessingResults);
-            new SevenZipAggregator(dbClient, mountFolder, checkedFullHealth).UpdateDatabase(fileProcessingResults);
-            new MultipartMkvAggregator(dbClient, mountFolder, checkedFullHealth).UpdateDatabase(fileProcessingResults);
+            new RarAggregator(dbClient, mountFolder, checkedFullHealth) { Encryption = encryption }.UpdateDatabase(fileProcessingResults);
+            new FileAggregator(dbClient, mountFolder, checkedFullHealth) { Encryption = encryption }.UpdateDatabase(fileProcessingResults);
+            new SevenZipAggregator(dbClient, mountFolder, checkedFullHealth) { Encryption = encryption }.UpdateDatabase(fileProcessingResults);
+            new MultipartMkvAggregator(dbClient, mountFolder, checkedFullHealth) { Encryption = encryption }.UpdateDatabase(fileProcessingResults);
 
             // post-processing
             new RenameDuplicatesPostProcessor(dbClient).RenameDuplicates();

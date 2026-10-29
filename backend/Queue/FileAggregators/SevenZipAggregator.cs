@@ -31,6 +31,10 @@ public class SevenZipAggregator(
         {
             var pathWithinArchive = sevenZipFile.PathWithinArchive;
             var davMultipartFileMeta = sevenZipFile.DavMultipartFileMeta;
+            // The processor built this meta before the import context existed;
+            // stamp the mounted file's transport-encryption context here (INF-11).
+            davMultipartFileMeta.YencEncrypted = Encryption.Encrypted ? true : null;
+            davMultipartFileMeta.YencTransportPassword = Encryption.Encrypted ? Encryption.TransportPassword : null;
             var parentDirectory = EnsureParentDirectory(pathWithinArchive);
             var name = ImportableVideoNamer.Normalize(
                 SanitizeDavName(Path.GetFileName(pathWithinArchive)),

@@ -1,4 +1,5 @@
-﻿using MemoryPack;
+﻿using System.ComponentModel.DataAnnotations.Schema;
+using MemoryPack;
 using NzbWebDAV.Models;
 
 namespace NzbWebDAV.Database.Models;
@@ -11,6 +12,18 @@ public partial class DavRarFile
 
     [MemoryPackOrder(1)]
     public RarPart[] RarParts { get; set; } = [];
+
+    // INF-21 / Finding-4 (writer-or-drop): the Orders 2/3
+    // YencEncrypted/YencTransportPassword fields introduced in Phase 2 are
+    // DROPPED. They had no writer: every current import mounts RAR content
+    // as DavMultipartFile (RarAggregator / LazyRarProcessor), and no code
+    // path constructs a DavRarFile — the record is read-only legacy from
+    // pre-blob-store installs. A legacy encrypted DavRarFile could only be
+    // mis-served anyway: nothing wrote its fields, so any supposedly
+    // encrypted legacy record reads as ordinary. Removing the fields keeps
+    // one source of truth (DavMultipartFile.Meta Orders 7/8); old blobs
+    // written with Orders 2/3 are tolerated by MemoryPack version tolerance
+    // (unknown trailing fields are skipped on deserialize).
 
     // navigation helpers
     [MemoryPackIgnore]
@@ -44,6 +57,8 @@ public partial class DavRarFile
 
     public DavMultipartFile.Meta ToDavMultipartFileMeta()
     {
+        // Legacy DavRarFile records predate transport encryption and carry
+        // no context (Finding-4 drop above); the transient meta is ordinary.
         return new DavMultipartFile.Meta
         {
             FileParts = RarParts.Select(x => new DavMultipartFile.FilePart()

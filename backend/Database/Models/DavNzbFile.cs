@@ -75,6 +75,24 @@ public partial class DavNzbFile
     [MemoryPackOrder(9)]
     public Par2FileProof? VerificationProof { get; set; }
 
+    /// <summary>
+    /// True when this file's articles are yEnc transport-encrypted (Body Standard §8,
+    /// v1.2 combined mode). Null/false on legacy blobs = ordinary, untouched behaviour.
+    /// Blob/MemoryPack only — not an EF column. VersionTolerant / additive — no migration.
+    /// </summary>
+    [NotMapped]
+    [MemoryPackOrder(10)]
+    public bool? YencEncrypted { get; set; }
+
+    /// <summary>
+    /// Resolved transport password for <see cref="YencEncrypted"/> (filename password
+    /// wins over NZB meta). Persisted resolved so WebDAV reads do not re-derive it
+    /// from a queue-item filename. Never logged. Blob/MemoryPack only.
+    /// </summary>
+    [NotMapped]
+    [MemoryPackOrder(11)]
+    public string? YencTransportPassword { get; set; }
+
     // navigation helpers
     [MemoryPackIgnore]
     public DavItem? DavItem { get; set; }
