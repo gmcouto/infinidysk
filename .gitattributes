@@ -7,3 +7,7 @@
 
 # Binary test archives — do not CRLF-convert
 tests/TestArchives/** binary
+
+# Encrypted yEnc wire fixtures — CRLF is part of the article bytes
+tests/NzbWebDAV.Tests/TestFixtures/EncryptedArticles/** binary
+tests/UsenetSharp.Tests/TestFixtures/EncryptedArticles/** binary

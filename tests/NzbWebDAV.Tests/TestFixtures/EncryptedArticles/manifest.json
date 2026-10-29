@@ -1,0 +1,54 @@
+{
+  "password": "public-conformance-vector-key-2026",
+  "salt_hex": "1a2b3c4d5e6f7890abcdef1234567890",
+  "generation_command": "/tmp/opencode/venv-inf05/bin/python /tmp/opencode/gen_inf05.py (helpers from yenc-encryption-standards/scripts/yenc_enc_reference.py: derive_key/derive_body_nonce/derive_control_keys/build_aad/body_encrypt/ff1_encrypt; plain yEnc encoding in the generator)",
+  "tamper_fixtures": [
+    {
+      "file": "tamper-dual-salt.bin",
+      "kind": "parsed-field salt disagreement: bootstrap salt == upload salt, =yencryption salt differs; rejected before AEAD",
+      "generation_command": "/tmp/opencode/venv-inf05/bin/python /tmp/opencode/gen_tamper2.py"
+    },
+    {
+      "file": "tamper-dual-index.bin",
+      "kind": "parsed-field index disagreement: bootstrap index 1, =yencryption index 2 (tag computed for index 2); rejected before AEAD",
+      "generation_command": "/tmp/opencode/venv-inf05/bin/python /tmp/opencode/gen_tamper2.py"
+    },
+    {
+      "file": "tamper-tag.bin",
+      "kind": "parsed-field tag tamper: bootstrap/=yencryption salt+index agree (index 1), ciphertext and wire CRC correct, =yencryption tag first byte XOR 0x01; rejected only by the AEAD open",
+      "generation_command": "/tmp/opencode/venv-inf05/bin/python /tmp/opencode/gen_tamper_tag.py",
+      "bytes": 288
+    }
+  ],
+  "articles": [
+    {
+      "file": "article-single.bin",
+      "expected": "expected-single.bin",
+      "segment_index": 1,
+      "multipart": false,
+      "name": "file-a.bin",
+      "plaintext_bytes": 328
+    },
+    {
+      "file": "article-part1.bin",
+      "expected": "expected-multipart.bin (first 256 bytes)",
+      "segment_index": 2,
+      "multipart": true,
+      "part": 1,
+      "begin": 1,
+      "name": "file-b.bin",
+      "plaintext_bytes": 256
+    },
+    {
+      "file": "article-part2.bin",
+      "expected": "expected-multipart.bin (remaining 244 bytes)",
+      "segment_index": 3,
+      "multipart": true,
+      "part": 2,
+      "begin": 257,
+      "name": "file-b.bin",
+      "plaintext_bytes": 244
+    }
+  ],
+  "notes": "All articles share one upload salt; segmentIndex continues globally 1,2,3 across the two files. Fixtures generated once at authoring time; C# tests must never encrypt fixtures with production code."
+}
