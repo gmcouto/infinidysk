@@ -52,6 +52,8 @@ public class RarAggregator(DavDatabaseClient dbClient, DavItem mountDirectory, b
                 ArchivePassword = result.Password,
                 PendingParts = result.ResolvedTrailingParts is null ? result.PendingParts : [],
                 ExpectedFileSize = result.TotalFileSize,
+                YencEncrypted = Encryption.Encrypted ? true : null,
+                YencTransportPassword = Encryption.Encrypted ? Encryption.TransportPassword : null,
             }
         };
 
@@ -124,6 +126,8 @@ public class RarAggregator(DavDatabaseClient dbClient, DavItem mountDirectory, b
                 Metadata = new DavMultipartFile.Meta()
                 {
                     AesParams = aesParams,
+                    YencEncrypted = Encryption.Encrypted ? true : null,
+                    YencTransportPassword = Encryption.Encrypted ? Encryption.TransportPassword : null,
                     FileParts = fileParts.Select(x =>
                     {
                         var rangeIndex = x.NzbFile.GetSegmentByteRangeIndex();

@@ -4,6 +4,8 @@ using NzbWebDAV.Clients.Usenet.Contexts;
 using NzbWebDAV.Exceptions;
 using NzbWebDAV.Extensions;
 using NzbWebDAV.Models.Nzb;
+using NzbWebDAV.Queue;
+using NzbWebDAV.Utils;
 using Serilog;
 using UsenetSharp.Models;
 
@@ -42,6 +44,23 @@ public class PlaybackFastVerifier
             Log.Debug("Fast-verify: NZB parse failed: {Message}", e.Message);
             return new VerifyOutcome(Verdict.Dead, null);
         }
+
+        // INF-21/22: an encrypted candidate's BODY probes must run under its
+        // transport context (resolved exactly like ingest) or encrypted
+        // articles would look like unavailability. An encrypted NZB without
+        // a resolvable password fails closed (Dead), never a ciphertext probe.
+        YencEncryptionContext encryption;
+        try
+        {
+            encryption = YencEncryptionContext.FromMetadata(
+                nzb.Metadata, FilenameUtil.GetNzbPassword(""));
+        }
+        catch (NonRetryableDownloadException)
+        {
+            return new VerifyOutcome(Verdict.Dead, null);
+        }
+        using var encryptionScope = YencEncryptionRuntimeContext.Begin(
+            encryption is { Encrypted: true } ? encryption.TransportPassword : null);
 
         var samples = PickSampleSegments(nzb, Math.Max(1, sampleCount));
         if (samples.Count == 0) return new VerifyOutcome(Verdict.Dead, null);

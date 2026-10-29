@@ -45,6 +45,7 @@ Please add feature requests and bug reports to the [issue tracker](https://githu
 - **Fast, resilient NNTP** — Pipeline article requests and cascade across multiple providers with automatic failover and circuit breakers.
 - **Provider routing and limits** — Separate provider-wide and article-transfer connection budgets, reserve burstable metadata capacity, set priorities and data caps, then Auto-tune transfers from the UI.
 - **Container-aware gap handling** — Preserve MPEG-TS timing across missing article ranges to reduce playback desynchronization.
+- **Encrypted yEnc streaming (experimental)** — NZBs marked with the experimental yEnc encryption standards (`yenc_encrypted` + `password` metadata) stream like ordinary ones: each segment is authenticated and decrypted in order as playback advances, and seeking authenticates only the segments covering the new position. A wrong password or damaged segment is treated as provider corruption and never served as playable content; ordinary NZBs are unaffected, and archive passwords stay separate. No new setting is involved — the password comes from the NZB (or the filename password, as today).
 
 ### Search and playback readiness
 

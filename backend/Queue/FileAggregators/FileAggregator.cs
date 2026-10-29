@@ -73,6 +73,8 @@ public class FileAggregator(DavDatabaseClient dbClient, DavItem mountDirectory, 
                 SegmentByteRangesTrusted = rangeIndex.IsTrusted,
                 SegmentFallbackIds = planned.NzbFile.GetSegmentFallbackIds(),
                 VerificationProof = planned.NzbFile.VerificationProof,
+                YencEncrypted = Encryption.Encrypted ? true : null,
+                YencTransportPassword = Encryption.Encrypted ? Encryption.TransportPassword : null,
             };
 
             var davItem = DavItem.New(

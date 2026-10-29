@@ -1,4 +1,5 @@
 using System.Runtime.CompilerServices;
+using NzbWebDAV.Clients.Usenet.Contexts;
 using NzbWebDAV.Clients.Usenet.Models;
 using NzbWebDAV.Exceptions;
 using NzbWebDAV.Models.Nzb;
@@ -69,7 +70,8 @@ public sealed class RepairedSegmentNntpClient : WrappingNntpClient
     public override Task<UsenetStatResponse> StatAsync(SegmentId segmentId, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        if (MultiProviderNntpClient.AttributionContext.Value is not null || !_patchStore.HasUsablePatch(segmentId))
+        if (YencEncryptionRuntimeContext.IsActive ||
+            MultiProviderNntpClient.AttributionContext.Value is not null || !_patchStore.HasUsablePatch(segmentId))
         {
             if (NzbFile.IsOmittedSegmentId(segmentId))
                 return Task.FromResult(new UsenetStatResponse
@@ -104,7 +106,7 @@ public sealed class RepairedSegmentNntpClient : WrappingNntpClient
         for (var index = 0; index < segmentIds.Count; index++)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            local[index] = !attribution && _patchStore.HasUsablePatch(segmentIds[index])
+            local[index] = !attribution && !YencEncryptionRuntimeContext.IsActive && _patchStore.HasUsablePatch(segmentIds[index])
                 ? true : NzbFile.IsOmittedSegmentId(segmentIds[index]) ? false : null;
             if (local[index] is null) misses.Add(segmentIds[index]);
         }
@@ -212,7 +214,12 @@ public sealed class RepairedSegmentNntpClient : WrappingNntpClient
 
     private bool TryGetPatchedResponse(SegmentId segmentId, out UsenetDecodedBodyResponse? response)
     {
-        if (MultiProviderNntpClient.AttributionContext.Value is not null)
+        // INF-17 audit: patch bodies are plaintext generated from already-
+        // authenticated reads (PAR2 proof), never wire articles — but no
+        // local body may be served under an encryption context, so bypass
+        // exactly like the segment cache does.
+        if (YencEncryptionRuntimeContext.IsActive ||
+            MultiProviderNntpClient.AttributionContext.Value is not null)
         {
             response = null;
             return false;

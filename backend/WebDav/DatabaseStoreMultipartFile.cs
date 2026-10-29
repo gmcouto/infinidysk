@@ -1,6 +1,7 @@
 ﻿using Microsoft.AspNetCore.Http;
 using Microsoft.EntityFrameworkCore;
 using NzbWebDAV.Clients.Usenet;
+using NzbWebDAV.Clients.Usenet.Contexts;
 using NzbWebDAV.Config;
 using NzbWebDAV.Database;
 using NzbWebDAV.Database.Models;
@@ -37,6 +38,11 @@ public class DatabaseStoreMultipartFile(
         if (multipartFile is null)
             throw new MissingFilePayloadException(davMultipartFile, DavItem.ItemSubType.MultipartFile);
 
+        // INF-21: lazy resolution reads volume headers (BODY fetches) and the
+        // stream captures its context from the persisted Meta; both run under
+        // the file's scope. Encrypted blob without a password fails closed.
+        using var encryption = YencEncryptionRuntimeContext.BeginForFile(
+            multipartFile.Metadata.YencEncrypted, multipartFile.Metadata.YencTransportPassword);
         if (multipartFile.Metadata.AesParams != null
             && multipartFile.Metadata.IsLazy
             && (multipartFile.Metadata.PendingParts?.Length ?? 0) > 0)

@@ -49,6 +49,14 @@ public class NzbFileStream(
 
     private readonly Lazy<Dictionary<string, int>> _segmentPositionIndex =
         YencFileValidationContext.CreatePositionIndex(fileSegmentIds, segmentFallbacks);
+    // INF-21: persistence-agnostic encryption capture. Callers that construct
+    // this stream from a persisted blob wrap construction in
+    // YencEncryptionRuntimeContext.BeginForFile; the runtime (with its
+    // single-flight KDF cache) is captured here so reads re-enter it via
+    // Activate per ReadAsync, long after that construction scope is disposed.
+    // Null for ordinary files — the decoder then behaves byte-identically.
+    private readonly UsenetSharp.Encryption.YencEncryptionContext? _encryptionRuntime =
+        YencEncryptionRuntimeContext.Capture();
     private const long MaximumForwardDrainBytes = 1024 * 1024;
     private const long MinimumPrewarmRangeBytes = 8L * 1024 * 1024;
     private const int MinimumPrewarmConnections = 2;
@@ -152,6 +160,10 @@ public class NzbFileStream(
     // One candidate stream with normal read-ahead serves consecutive slices.
     private NzbFileStream OpenSequentialPar2Candidate(long start, long endExclusive)
     {
+        // B3: the sequential producer may run on a background flow whose
+        // ambient scope is not this file's; construct the candidate explicitly
+        // under the captured runtime so its own Capture() sees it.
+        using var encryption = YencEncryptionRuntimeContext.Activate(_encryptionRuntime);
         var candidate = new NzbFileStream(
             fileSegmentIds, Length, usenetClient, articleBufferSize: articleBufferSize,
             segmentByteRanges: _segmentByteRanges, usePipelinedBodyRequests: usePipelinedBodyRequests,
@@ -169,6 +181,9 @@ public class NzbFileStream(
 
     private async Task ReadPar2CandidateAsync(long start, Memory<byte> target, CancellationToken cancellationToken)
     {
+        // B3: same explicit-runtime construction as the sequential candidate;
+        // Recover/provider-retry attempts may run outside the reader's flow.
+        using var encryption = YencEncryptionRuntimeContext.Activate(_encryptionRuntime);
         using var validation = YencFileValidationContext.BeginBufferedPar2ProofRead(
             fileSegmentIds, segmentFallbacks, _segmentPositionIndex);
         await using var candidate = new NzbFileStream(
@@ -200,6 +215,17 @@ public class NzbFileStream(
 
     public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
     {
+        // B3: run the verified branch under this instance's captured runtime
+        // (precedent MultipartFileStream.cs:31). Sequential/recover candidates
+        // independently re-Activate it before construction (OpenSequential-
+        // Par2Candidate/ReadPar2CandidateAsync), and AsyncLocal propagation
+        // through SliceProducer.RunAsync's Task.Yield continuation masks the
+        // ordering for those paths — but the prefix read (readPrefix: reader.
+        // ReadPrefixAsync, no candidate construction) and any direct provider
+        // retry (Par2CandidateReader via MultiProvider verification providers)
+        // rely on this Activate. Keep it: those flows never construct a
+        // candidate, so nothing else presents the captured runtime to them.
+        using var encryption = YencEncryptionRuntimeContext.Activate(_encryptionRuntime);
         if (verificationProof is not null)
             return await VerifiedStream.ReadAsync(buffer, cancellationToken).ConfigureAwait(false);
         using var yencFileValidation = YencFileValidationContext.BeginStreaming(

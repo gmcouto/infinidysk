@@ -264,6 +264,10 @@ public static class ExceptionExtensions
             or UnauthorizedAccessException
             or StreamingReadTimeoutException
             or RemoteResponseException
+            // INF-18: local-fatal yEnc KDF/crypto failures are known,
+            // operator-actionable failures — human-friendly warning, no
+            // stack dump. They are never retried as provider corruption.
+            or UsenetSharp.Encryption.YencEncryptionLocalException
             || exception.IsRetryableDownloadException()
             || exception.IsNonRetryableDownloadException();
     }

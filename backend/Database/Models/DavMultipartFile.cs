@@ -45,6 +45,17 @@ public partial class DavMultipartFile
         // Null only for blobs written before continuation-chain validation.
         [MemoryPackOrder(6)]
         public long? ExpectedFileSize { get; set; }
+
+        // yEnc transport encryption (Body §8): one context per mounted file lives
+        // on Meta (meta-level decision, INF-11). LazyRarResolver rebuilds FileParts
+        // from PendingParts under this same Meta, so per-part fields are NOT needed;
+        // every Meta reconstruction must copy these two fields. Null/false = ordinary.
+        [MemoryPackOrder(7)]
+        public bool? YencEncrypted { get; set; }
+
+        // Resolved transport password (filename ?? NZB meta). Never logged.
+        [MemoryPackOrder(8)]
+        public string? YencTransportPassword { get; set; }
     }
 
     [MemoryPackable(GenerateType.VersionTolerant)]

@@ -14,7 +14,16 @@ namespace NzbWebDAV.Services.Repair;
 public partial class Par2RepairService
 {
     private sealed record RepairPayload(DavNzbFile? PlainFile, HashSet<string> SegmentIds,
-        Dictionary<string, LongRange> TrustedRanges, List<(string[] SegmentIds, Par2FileProof Proof)> Proofs);
+        Dictionary<string, LongRange> TrustedRanges, List<(string[] SegmentIds, Par2FileProof Proof)> Proofs)
+    {
+        // INF-22: the item's persisted transport-encryption context. One job
+        // reads one item's files, so ExecuteRepairJobAsync installs it as
+        // the ambient scope for the whole job; streams constructed inside
+        // capture it (INF-21) and PAR2 only ever sees authenticated
+        // plaintext. Set by LoadRepairPayloadAsync from the persisted blobs.
+        public bool? YencEncrypted { get; set; }
+        public string? YencTransportPassword { get; set; }
+    }
 
     private sealed record SourceLayout(int FileIndex, NzbFile File, FileDesc Descriptor,
         IfscPacket Checksums, Par2FileSliceMap Map, string[] SegmentIds, bool PayloadOwned);
@@ -27,17 +36,22 @@ public partial class Par2RepairService
         var ranges = new Dictionary<string, LongRange>(StringComparer.Ordinal);
         var proofs = new List<(string[] SegmentIds, Par2FileProof Proof)>();
         DavNzbFile? plain = null;
+        bool? yencEncrypted = null;
+        string? yencTransportPassword = null;
         switch (item.SubType)
         {
             case DavItem.ItemSubType.NzbFile:
                 plain = await client.GetDavNzbFileAsync(item, ct).ConfigureAwait(false)
                     ?? throw new MissingFilePayloadException(item, item.SubType);
+                yencEncrypted = plain.YencEncrypted;
+                yencTransportPassword = plain.YencTransportPassword;
                 AddPart(plain.SegmentIds, plain.SegmentByteRanges, plain.SegmentByteRangesTrusted, plain.VerificationProof);
                 foreach (var index in ValidIndices(plain.MissingSegmentIndices, plain.SegmentIds.Length)
                              .Concat(ValidIndices(plain.CorruptSegmentIndices, plain.SegmentIds.Length)))
                     reads.UnavailableIds.Add(plain.SegmentIds[index]);
                 break;
             case DavItem.ItemSubType.RarFile:
+                // Legacy DavRarFile carries no transport context (Finding-4).
                 var rar = await client.GetDavRarFileAsync(item, ct).ConfigureAwait(false)
                     ?? throw new MissingFilePayloadException(item, item.SubType);
                 foreach (var part in rar.RarParts)
@@ -46,6 +60,8 @@ public partial class Par2RepairService
             case DavItem.ItemSubType.MultipartFile:
                 var multipart = await client.GetDavMultipartFileAsync(item, ct).ConfigureAwait(false)
                     ?? throw new MissingFilePayloadException(item, item.SubType);
+                yencEncrypted = multipart.Metadata.YencEncrypted;
+                yencTransportPassword = multipart.Metadata.YencTransportPassword;
                 foreach (var part in multipart.Metadata.FileParts)
                     AddPart(part.SegmentIds, part.SegmentByteRanges, part.SegmentByteRangesTrusted, part.VerificationProof);
                 foreach (var part in multipart.Metadata.PendingParts ?? [])
@@ -56,7 +72,11 @@ public partial class Par2RepairService
         }
 
         if (ids.Count == 0) throw new MissingFilePayloadException(item, item.SubType);
-        return new RepairPayload(plain, ids, ranges, proofs);
+        return new RepairPayload(plain, ids, ranges, proofs)
+        {
+            YencEncrypted = yencEncrypted,
+            YencTransportPassword = yencTransportPassword,
+        };
 
         void AddPart(string[] segmentIds, LongRange[]? segmentRanges, bool? trusted, Par2FileProof? proof = null)
         {
@@ -495,7 +515,11 @@ public partial class Par2RepairService
     private static bool IsUnavailableArticle(Exception exception)
         => exception is InvalidDataException or EndOfStreamException
            || exception.TryGetCausingException<UsenetArticleNotFoundException>(out _)
-           || exception.TryGetCausingException<UsenetCorruptArticleException>(out _);
+           || exception.TryGetCausingException<UsenetCorruptArticleException>(out _)
+           // INF-13: an authentication failure is the provider-failover tier (plan
+           // §4.6), so PAR2 treats the article as unavailable — classified as auth
+           // by RepairReadContext.NoteUnavailable, never as persistent damage.
+           || YencAuthenticationException.IsAuthenticationFailure(exception);
 
     internal static LongRange[] CompleteVolumeRanges(long fileLength, LongRange?[] evidence)
     {

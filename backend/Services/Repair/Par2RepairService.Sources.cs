@@ -1,4 +1,5 @@
 using NzbWebDAV.Clients.Usenet;
+using NzbWebDAV.Exceptions;
 using NzbWebDAV.Utils;
 
 namespace NzbWebDAV.Services.Repair;
@@ -14,6 +15,7 @@ public partial class Par2RepairService
         private readonly Dictionary<int, (byte[] Bytes, IDisposable Reservation)> _bodies = new();
         private readonly Dictionary<int, HashSet<int>> _missing = new();
         private readonly Dictionary<int, HashSet<int>> _corrupt = new();
+        private readonly HashSet<int> _authenticationFailures = new();
         private SourceLayout _layout;
         private long _cachedBodyBytes;
         private long _peakCachedBodyBytes;
@@ -43,6 +45,15 @@ public partial class Par2RepairService
 
         public void NoteMissing(int index) { _missing[_layout.FileIndex].Add(index); Evict(index); }
         public void NoteCorrupt(int index) { _corrupt[_layout.FileIndex].Add(index); Evict(index); }
+
+        // INF-13: marks the currently laid-out segment as authentication-classified
+        // damage (plan §4.6) — its missing/corrupt discovery must not persist.
+        public void NoteAuthenticationFailure(int index) { _authenticationFailures.Add(index); }
+
+        public bool HasAuthenticationFailure(
+            IReadOnlyCollection<int> missing, IReadOnlyCollection<int> corrupt) =>
+            missing.Any(_authenticationFailures.Contains)
+            || corrupt.Any(_authenticationFailures.Contains);
 
         public void UseLayout(SourceLayout layout)
         {
@@ -138,6 +149,8 @@ public partial class Par2RepairService
             catch (Exception exception) when (IsUnavailableArticle(exception))
             {
                 _reads.NoteUnavailable(_layout.SegmentIds[index], exception);
+                if (YencAuthenticationException.IsAuthenticationFailure(exception))
+                    NoteAuthenticationFailure(index);
                 if (_reads.MissingIds.Contains(_layout.SegmentIds[index])) NoteMissing(index);
                 else NoteCorrupt(index);
                 return null;

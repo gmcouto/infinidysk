@@ -8,6 +8,7 @@ using NzbWebDAV.Database.MigrationHelpers;
 using NzbWebDAV.Database.Models;
 using NzbWebDAV.Models;
 using NzbWebDAV.Models.Nzb;
+using NzbWebDAV.Queue;
 using NzbWebDAV.Queue.SiblingDonors;
 using NzbWebDAV.Tests.Database;
 
@@ -69,6 +70,23 @@ public sealed class SiblingDonorAttacherTests : IAsyncLifetime
 
         Assert.Equal(["a1-existing@example", "b1@example", "b1-alt@example"], primary.Segments[0].FallbackMessageIds);
         Assert.Equal(["b2@example"], primary.Segments[1].FallbackMessageIds);
+    }
+
+    [Theory]
+    [InlineData(false, null, false, null, true)]
+    [InlineData(true, "donor-pw", true, "donor-pw", true)]
+    [InlineData(true, "donor-pw", true, "other-pw", false)]
+    [InlineData(true, "donor-pw", false, null, false)]
+    [InlineData(false, null, true, "donor-pw", false)]
+    public void EncryptionContextsMatch_OnlyForSameContext(
+        bool targetEncrypted, string? targetPassword,
+        bool donorEncrypted, string? donorPassword, bool expected)
+    {
+        // INF-12: a donor merge keeps the target's context and never imports a
+        // donor's different one; mismatch fails closed (no merge).
+        var target = new YencEncryptionContext(targetEncrypted, targetPassword);
+        var donor = new YencEncryptionContext(donorEncrypted, donorPassword);
+        Assert.Equal(expected, SiblingDonorAttacher.EncryptionContextsMatch(target, donor));
     }
 
     [Fact]

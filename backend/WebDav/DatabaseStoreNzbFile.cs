@@ -1,5 +1,6 @@
 ﻿using Microsoft.AspNetCore.Http;
 using NzbWebDAV.Clients.Usenet;
+using NzbWebDAV.Clients.Usenet.Contexts;
 using NzbWebDAV.Config;
 using NzbWebDAV.Database;
 using NzbWebDAV.Database.Models;
@@ -33,6 +34,10 @@ public class DatabaseStoreNzbFile(
         var file = await dbClient.GetDavNzbFileAsync(davNzbFile, cancellationToken).ConfigureAwait(false);
         if (file is null)
             throw new MissingFilePayloadException(davNzbFile, DavItem.ItemSubType.NzbFile);
+        // INF-21: the stream captures the persisted context from inside this
+        // scope; fail-closed for an encrypted blob without a password.
+        using var encryption = YencEncryptionRuntimeContext.BeginForFile(
+            file.YencEncrypted, file.YencTransportPassword);
         return GetStream(file);
     }
 

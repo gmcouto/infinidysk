@@ -1,4 +1,5 @@
 ﻿using System.Runtime.CompilerServices;
+using NzbWebDAV.Clients.Usenet.Contexts;
 using NzbWebDAV.Clients.Usenet.Models;
 using NzbWebDAV.Exceptions;
 using NzbWebDAV.Extensions;
@@ -54,6 +55,11 @@ public class BaseNntpClient : NntpClient
                 UsenetBandwidthLimiter.Current?.AcquireAsync(bytes, ct) ?? ValueTask.CompletedTask
             : null,
             PayloadBytesObserver = payloadBytesObserver,
+            // INF-14: per-operation encryption snapshot. This pooled client
+            // never stores a password; UsenetSharp evaluates this provider
+            // once at each DecodedBodyAsync/DecodedBodiesAsync/YencHeadersAsync
+            // entry and threads the snapshot into that body's decoder.
+            YencEncryptionProvider = static () => YencEncryptionRuntimeContext.CurrentRuntimeContext,
         }))
     {
         ReadTimeout = readTimeout ?? TimeSpan.FromSeconds(30);

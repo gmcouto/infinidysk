@@ -790,6 +790,55 @@ public sealed class HealthCheckDegradedClassificationTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task EncryptedFile_DegradedVerdict_PersistsNoNewMarks()
+    {
+        // F1/INF-13 (plan §4.6): an encrypted blob's degraded verdict must not
+        // persist NEW missing/corrupt marks — the holes may only reflect an
+        // unauthenticated read. The verdict and logging stay intact.
+        var segments = NewSegmentIds(6);
+        var sizes = new long[] { 10_000, 10_000, 50, 10_000, 10_000, 10_000 };
+        var (item, _) = await AddVideoFileAsync(
+            "movie.mkv", segments, sizes, yencEncrypted: true);
+        var fake = NewFakeClient(segments, missing: [2]);
+        var (service, par2) = await NewServiceAsync(fake, par2Outcome: false);
+
+        await service.PerformHealthCheck(item, _dbClient, concurrency: 4, CancellationToken.None);
+
+        var row = Assert.Single(GetHealthRows(item.Id));
+        Assert.Equal(HealthCheckResult.HealthResult.Degraded, row.Result);
+        Assert.Equal(HealthCheckResult.RepairAction.None, row.RepairStatus);
+        Assert.Equal([segments[2]], Assert.Single(par2.Requests));
+
+        var blob = await BlobStore.ReadBlob<DavNzbFile>(ReloadItem(item.Id).FileBlobId!.Value);
+        Assert.NotNull(blob);
+        Assert.Equal(true, blob.YencEncrypted);
+        Assert.Null(blob.MissingSegmentIndices);
+        Assert.Null(blob.CorruptSegmentIndices);
+    }
+
+    [Fact]
+    public async Task OrdinaryFile_DegradedVerdict_StillPersistsMarks()
+    {
+        // F1 opposite direction: an ordinary (unencrypted) blob keeps today's
+        // degraded mark persistence untouched.
+        var segments = NewSegmentIds(6);
+        var sizes = new long[] { 10_000, 10_000, 50, 10_000, 10_000, 10_000 };
+        var (item, _) = await AddVideoFileAsync("movie.mkv", segments, sizes);
+        var fake = NewFakeClient(segments, missing: [2]);
+        var (service, _) = await NewServiceAsync(fake, par2Outcome: false);
+
+        await service.PerformHealthCheck(item, _dbClient, concurrency: 4, CancellationToken.None);
+
+        var row = Assert.Single(GetHealthRows(item.Id));
+        Assert.Equal(HealthCheckResult.HealthResult.Degraded, row.Result);
+
+        var blob = await BlobStore.ReadBlob<DavNzbFile>(ReloadItem(item.Id).FileBlobId!.Value);
+        Assert.NotNull(blob);
+        Assert.Null(blob.YencEncrypted);
+        Assert.Equal([2], blob.MissingSegmentIndices!);
+    }
+
+    [Fact]
     public async Task RunOverCap_Fails_SeedsFailFastWithAllMisses_AndRepairs()
     {
         var segments = NewSegmentIds(6);
@@ -2391,7 +2440,8 @@ public sealed class HealthCheckDegradedClassificationTests : IAsyncLifetime
         int[]? preExistingHoles = null,
         int[]? preExistingCorrupt = null,
         byte? containerClass = null,
-        long? criticalHeadEndExclusive = null)
+        long? criticalHeadEndExclusive = null,
+        bool yencEncrypted = false)
     {
         var itemId = Guid.NewGuid();
         var ranges = new LongRange[segmentSizes.Length];
@@ -2413,6 +2463,8 @@ public sealed class HealthCheckDegradedClassificationTests : IAsyncLifetime
             CorruptSegmentIndices = preExistingCorrupt,
             ContainerClass = containerClass,
             CriticalHeadEndExclusive = criticalHeadEndExclusive,
+            YencEncrypted = yencEncrypted ? true : null,
+            YencTransportPassword = yencEncrypted ? "transport-password-probe" : null,
         });
 
         var item = DavItem.New(

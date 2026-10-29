@@ -217,6 +217,8 @@ public class LazyRarResolver(INntpClient usenetClient, ConfigManager configManag
                 ArchivePassword = meta.ArchivePassword,
                 PendingParts = [],
                 ExpectedFileSize = meta.ExpectedFileSize,
+                YencEncrypted = meta.YencEncrypted,
+                YencTransportPassword = meta.YencTransportPassword,
             };
 
             Log.Information(
@@ -487,6 +489,8 @@ public class LazyRarResolver(INntpClient usenetClient, ConfigManager configManag
         ArchivePassword = meta.ArchivePassword,
         PendingParts = meta.PendingParts,
         ExpectedFileSize = meta.ExpectedFileSize,
+        YencEncrypted = meta.YencEncrypted,
+        YencTransportPassword = meta.YencTransportPassword,
     };
 
     private static bool TryApplySegmentByteRanges(DavMultipartFile.FilePart part, LongRange[]? ranges)
@@ -805,6 +809,8 @@ public class LazyRarResolver(INntpClient usenetClient, ConfigManager configManag
                 ArchivePassword = meta.ArchivePassword,
                 PendingParts = newPending,
                 ExpectedFileSize = meta.ExpectedFileSize,
+                YencEncrypted = meta.YencEncrypted,
+                YencTransportPassword = meta.YencTransportPassword,
             };
 
             var becameComplete = meta.IsLazy && newPending.Length == 0;

@@ -334,6 +334,8 @@ public partial class UsenetClient
                     Stream = new YencStream(decodedStream, headersCompletion.Task)
                 });
 
+                // Per-body snapshot in request order (INF-14/INF-18).
+                var encryptionContext = _options.YencEncryptionProvider?.Invoke();
                 var bodyReadResult = await ReadDecodedBodyToPipeAsync(
                         pipe.Writer,
                         headersCompletion,
@@ -342,7 +344,8 @@ public partial class UsenetClient
                         decodedStream: decodedStream,
                         releaseCommandLock: false,
                         sharedReadTimeout: sharedReadTimeout,
-                        callerCancellationToken: callerCancellationToken)
+                        callerCancellationToken: callerCancellationToken,
+                        encryptionContext: encryptionContext)
                     .ConfigureAwait(false);
                 if (bodyReadResult.Failure == null)
                 {

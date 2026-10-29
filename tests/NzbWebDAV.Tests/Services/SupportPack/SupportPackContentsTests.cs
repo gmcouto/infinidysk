@@ -119,6 +119,61 @@ public sealed class SupportPackContentsTests : IDisposable
     }
 
     [Fact]
+    public async Task Pack_NeverContainsPersistedTransportPassword()
+    {
+        // INF-12: a marker transport password persisted in a DavNzbFile blob
+        // must never appear in a generated support pack — not in logs, not in
+        // any section. The password is planted in both the log lane and the
+        // persisted blob; the pack redactor collects the blob's password.
+        const string marker = "support-pack-transport-marker-pw";
+        var mainSink = new LogBufferSink(10);
+        var warningBuffer = new WarningLogBuffer(new LogBufferSink(50));
+        var logger = new LoggerConfiguration()
+            .MinimumLevel.Debug()
+            .WriteTo.Sink(mainSink)
+            .WriteTo.Sink(warningBuffer.Sink, restrictedToMinimumLevel: LogEventLevel.Warning)
+            .CreateLogger();
+        logger.Warning("Decrypt probe used password {Password}", marker);
+
+        await using (var context = new DavDatabaseContext())
+        {
+            await context.Database.MigrateAsync();
+            var historyId = Guid.NewGuid();
+            context.HistoryItems.Add(new HistoryItem
+            {
+                Id = historyId,
+                CreatedAt = DateTime.UtcNow,
+                FileName = "release.nzb",
+                JobName = "release",
+                Category = "movies",
+                DownloadStatus = HistoryItem.DownloadStatusOption.Completed,
+                NzbBlobId = historyId,
+            });
+            var fileId = Guid.NewGuid();
+            var blobId = Guid.NewGuid();
+            context.Items.Add(DavItem.New(
+                fileId, DavItem.ContentFolder, "data.bin", 10,
+                DavItem.ItemType.UsenetFile, DavItem.ItemSubType.NzbFile,
+                null, null, historyId, blobId, nzbBlobId: historyId));
+            await context.SaveChangesAsync();
+            await BlobStore.WriteBlob(blobId, new DavNzbFile
+            {
+                Id = fileId,
+                SegmentIds = ["seg@example.test"],
+                YencEncrypted = true,
+                YencTransportPassword = marker,
+            });
+        }
+
+        var entries = await ReadPackEntriesAsync(mainSink, warningBuffer);
+
+        Assert.NotEmpty(entries);
+        foreach (var (name, content) in entries)
+            Assert.DoesNotContain(marker, content, StringComparison.Ordinal);
+        Assert.Contains("[REDACTED]", entries["logs/warnings.log"]);
+    }
+
+    [Fact]
     public async Task Pack_ReportsProcessUptimeRatherThanServiceConstructionTime()
     {
         var entries = await ReadPackEntriesAsync(new LogBufferSink(10), new WarningLogBuffer(new LogBufferSink(50)));

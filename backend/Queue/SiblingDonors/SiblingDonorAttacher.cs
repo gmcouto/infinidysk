@@ -5,6 +5,7 @@ using NzbWebDAV.Database;
 using NzbWebDAV.Database.Models;
 using NzbWebDAV.Extensions;
 using NzbWebDAV.Models.Nzb;
+using NzbWebDAV.Queue;
 using Serilog;
 using ZstdSharp;
 
@@ -111,6 +112,16 @@ internal static class SiblingDonorAttacher
                 if (document is null) continue;
 
                 var siblingFilesByKey = IndexBySegmentIds(document.Files);
+                // INF-12: a donor must never import a different encryption
+                // context into the target. Read the donor NZB's own context and
+                // refuse the merge (fail closed) unless it matches the target's.
+                var donorContext = YencEncryptionContext.FromMetadata(
+                    document.Metadata, filenamePassword: null);
+                var targetContext = YencEncryptionContext.FromMetadata(
+                    nzb.Metadata, filenamePassword: null);
+                if (!EncryptionContextsMatch(targetContext, donorContext))
+                    continue;
+
                 await BackfillSiblingBlobsAsync(
                         dbClient.Ctx,
                         sibling.Id,
@@ -323,6 +334,21 @@ internal static class SiblingDonorAttacher
     internal static NzbFile? FindMatchingFile(IEnumerable<NzbFile> files, NzbFile target)
     {
         return files.FirstOrDefault(file => IsDonorMatch(file, target));
+    }
+
+    /// <summary>
+    /// INF-12: donor and target encryption contexts match only when both are
+    /// ordinary, or both are encrypted with the same transport password.
+    /// Anything else fails closed — the merge keeps the target's own context.
+    /// </summary>
+    internal static bool EncryptionContextsMatch(
+        YencEncryptionContext target, YencEncryptionContext donor)
+    {
+        if (target.Encrypted != donor.Encrypted)
+            return false;
+        if (!target.Encrypted)
+            return true;
+        return string.Equals(target.TransportPassword, donor.TransportPassword, StringComparison.Ordinal);
     }
 
     internal static bool MergePrimaryIdsIntoDavNzbFile(
